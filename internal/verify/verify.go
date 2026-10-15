@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/anirudh/secretscan/internal/detect"
+	"github.com/AISolutionLabs/secret-scanner/internal/detect"
 )
 
 // Status values.

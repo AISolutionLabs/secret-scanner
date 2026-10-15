@@ -11,9 +11,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/anirudh/secretscan/internal/config"
-	"github.com/anirudh/secretscan/internal/detect"
-	"github.com/anirudh/secretscan/internal/remediate"
+	"github.com/AISolutionLabs/secret-scanner/internal/config"
+	"github.com/AISolutionLabs/secret-scanner/internal/detect"
+	"github.com/AISolutionLabs/secret-scanner/internal/remediate"
 )
 
 // Options control rendering.
@@ -275,7 +275,7 @@ func SARIF(w io.Writer, fs []detect.Finding, rules []*config.CompiledRule, versi
 		"runs": []any{map[string]any{
 			"tool": map[string]any{"driver": map[string]any{
 				"name": "secretscan", "version": version, "semanticVersion": version,
-				"informationUri": "https://github.com/anirudh/secretscan", "rules": srules}},
+				"informationUri": "https://github.com/AISolutionLabs/secret-scanner", "rules": srules}},
 			"results": results,
 		}},
 	}

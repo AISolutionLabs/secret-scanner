@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/anirudh/secretscan/internal/detect"
+	"github.com/AISolutionLabs/secret-scanner/internal/detect"
 )
 
 // CommitMarker prefixes commit header lines produced by GitLogFormat.

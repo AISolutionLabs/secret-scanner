@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/anirudh/secretscan/internal/detect"
+	"github.com/AISolutionLabs/secret-scanner/internal/detect"
 )
 
 const zeroSHA = "0000000000000000000000000000000000000000"

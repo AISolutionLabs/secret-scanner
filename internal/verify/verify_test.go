@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/anirudh/secretscan/internal/detect"
+	"github.com/AISolutionLabs/secret-scanner/internal/detect"
 )
 
 func TestVerifierStatuses(t *testing.T) {

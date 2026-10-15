@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/anirudh/secretscan/internal/config"
+	"github.com/AISolutionLabs/secret-scanner/internal/config"
 )
 
 // IgnoreSet suppresses known findings. It understands:

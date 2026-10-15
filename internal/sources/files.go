@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/anirudh/secretscan/internal/detect"
+	"github.com/AISolutionLabs/secret-scanner/internal/detect"
 )
 
 // FileOptions control filesystem scans.

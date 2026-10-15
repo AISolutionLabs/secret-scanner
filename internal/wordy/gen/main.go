@@ -14,7 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/anirudh/secretscan/internal/wordy"
+	"github.com/AISolutionLabs/secret-scanner/internal/wordy"
 )
 
 func main() {

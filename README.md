@@ -32,7 +32,7 @@ fits pre-commit/pre-push hooks, CI and git push proxies alike.
 ## Install
 
 ```sh
-go install github.com/anirudh/secretscan/cmd/secretscan@latest
+go install github.com/AISolutionLabs/secret-scanner/cmd/secretscan@latest
 # or from source
 make build            # -> bin/secretscan
 make release          # linux/darwin/windows, amd64/arm64 in dist/
@@ -74,7 +74,7 @@ With the [pre-commit](https://pre-commit.com) framework, the repo ships a
 
 ```yaml
 repos:
-  - repo: https://github.com/anirudh/secretscan
+  - repo: https://github.com/AISolutionLabs/secret-scanner
     rev: v1.0.0
     hooks:
       - id: secretscan          # staged changes

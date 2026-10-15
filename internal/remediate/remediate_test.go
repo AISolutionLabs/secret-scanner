@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anirudh/secretscan/internal/config"
+	"github.com/AISolutionLabs/secret-scanner/internal/config"
 )
 
 func TestEveryDefaultRuleHasAFamily(t *testing.T) {

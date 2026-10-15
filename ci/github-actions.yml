@@ -12,7 +12,7 @@ jobs:
         with: { fetch-depth: 0 }
       - uses: actions/setup-go@v5
         with: { go-version: '1.24' }
-      - run: go install github.com/anirudh/secretscan/cmd/secretscan@latest
+      - run: go install github.com/AISolutionLabs/secret-scanner/cmd/secretscan@latest
       - name: Scan
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then

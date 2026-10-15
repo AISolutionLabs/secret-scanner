@@ -10,8 +10,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/anirudh/secretscan/internal/config"
-	"github.com/anirudh/secretscan/internal/detect"
+	"github.com/AISolutionLabs/secret-scanner/internal/config"
+	"github.com/AISolutionLabs/secret-scanner/internal/detect"
 )
 
 func fakePAT() string {

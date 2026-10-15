@@ -13,7 +13,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/anirudh/secretscan/internal/toml"
+	"github.com/AISolutionLabs/secret-scanner/internal/toml"
 )
 
 // Config is the on-disk configuration. Field names match gitleaks so existing

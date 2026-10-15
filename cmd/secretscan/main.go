@@ -20,12 +20,12 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/anirudh/secretscan/internal/config"
-	"github.com/anirudh/secretscan/internal/detect"
-	"github.com/anirudh/secretscan/internal/remediate"
-	"github.com/anirudh/secretscan/internal/report"
-	"github.com/anirudh/secretscan/internal/sources"
-	"github.com/anirudh/secretscan/internal/verify"
+	"github.com/AISolutionLabs/secret-scanner/internal/config"
+	"github.com/AISolutionLabs/secret-scanner/internal/detect"
+	"github.com/AISolutionLabs/secret-scanner/internal/remediate"
+	"github.com/AISolutionLabs/secret-scanner/internal/report"
+	"github.com/AISolutionLabs/secret-scanner/internal/sources"
+	"github.com/AISolutionLabs/secret-scanner/internal/verify"
 )
 
 var version = "1.0.0"

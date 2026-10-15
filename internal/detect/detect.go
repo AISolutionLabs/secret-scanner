@@ -15,9 +15,9 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/anirudh/secretscan/internal/config"
-	"github.com/anirudh/secretscan/internal/remediate"
-	"github.com/anirudh/secretscan/internal/wordy"
+	"github.com/AISolutionLabs/secret-scanner/internal/config"
+	"github.com/AISolutionLabs/secret-scanner/internal/remediate"
+	"github.com/AISolutionLabs/secret-scanner/internal/wordy"
 )
 
 // Fragment is a unit of text to scan, with its origin.
