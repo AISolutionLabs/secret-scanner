@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/anirudh/secretscan/internal/config"
+	"github.com/anirudh/secretscan/internal/remediate"
 	"github.com/anirudh/secretscan/internal/wordy"
 )
 
@@ -55,6 +56,9 @@ type Finding struct {
 	Fingerprint  string   `json:"Fingerprint"`
 	SecretHash   string   `json:"SecretHash"` // sha256 of the raw secret; stable across redaction
 	Verification string   `json:"Verification,omitempty"`
+	// Remediation is filled in after detection (rotation, keyless
+	// alternative, replacement expression); see package remediate.
+	Remediation *remediate.Guidance `json:"Remediation,omitempty"`
 
 	sStart, sEnd int  // secret span in the fragment (for overlap checks)
 	generic      bool // produced by a generic rule

@@ -25,6 +25,13 @@ type Config struct {
 	Rules       []Rule      `json:"rules"`
 	Allowlist   *Allowlist  `json:"allowlist"`  // legacy single global allowlist
 	Allowlists  []Allowlist `json:"allowlists"` // global allowlists
+	Remediation Remediation `json:"remediation"`
+}
+
+// Remediation sets organization defaults for fix guidance.
+type Remediation struct {
+	Store   string `json:"store"`   // env | vault | aws | azure | gcp: the secret store snippets target
+	Runbook string `json:"runbook"` // link to your internal secret-handling / rotation runbook
 }
 
 // Extend controls how this config relates to others.
@@ -242,7 +249,13 @@ func loadWithExtends(path string, depth int) (*Config, []string, error) {
 // merge returns base overlaid with top: rules with the same ID are replaced
 // by top's version; allowlists accumulate.
 func merge(base, top *Config) *Config {
-	out := &Config{Title: top.Title, Description: top.Description, Extend: top.Extend}
+	out := &Config{Title: top.Title, Description: top.Description, Extend: top.Extend, Remediation: base.Remediation}
+	if top.Remediation.Store != "" {
+		out.Remediation.Store = top.Remediation.Store
+	}
+	if top.Remediation.Runbook != "" {
+		out.Remediation.Runbook = top.Remediation.Runbook
+	}
 	if out.Title == "" {
 		out.Title = base.Title
 	}
@@ -404,13 +417,14 @@ type CompiledAllowlist struct {
 
 // Ruleset is a compiled config.
 type Ruleset struct {
-	Rules      []*CompiledRule
-	Allowlists []*CompiledAllowlist // global
+	Rules       []*CompiledRule
+	Allowlists  []*CompiledAllowlist // global
+	Remediation Remediation
 }
 
 // Compile validates and compiles a resolved config.
 func Compile(c *Config) (*Ruleset, error) {
-	rs := &Ruleset{}
+	rs := &Ruleset{Remediation: c.Remediation}
 	seen := map[string]bool{}
 	var errs []string
 	for _, r := range c.Rules {

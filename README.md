@@ -21,6 +21,12 @@ fits pre-commit/pre-push hooks, CI and git push proxies alike.
   carry a SHA-256 of each secret so baselines work without storing secrets.
 - **Optional live verification** (`--verify`) for GitHub, GitLab, Slack,
   Stripe, OpenAI, Anthropic, Hugging Face, npm, SendGrid, DigitalOcean, Groq and Linear.
+- **Fix guidance**: every finding says how urgent it is (verified-live means
+  revoke now), how to rotate it at the issuer, how to avoid static secrets
+  (workload identity, OIDC, managed identity), and the replacement code in the
+  file's language. `secretscan explain` gives efficient loading patterns for
+  env, Vault, AWS, Azure and GCP, and `--fix` rewrites literals into env
+  lookups. See [docs/using-secrets.md](docs/using-secrets.md).
 - **Reports** in text, JSON, SARIF 2.1.0, CSV and JUnit XML.
 
 ## Install
@@ -126,6 +132,48 @@ used as the prefilter automatically. `secretscan validate` compiles everything
 and runs each rule's `examples` and `negatives`, which makes it a good CI check for
 config changes. `secretscan rules [--tag aws] [-f json]` lists the active rules.
 
+## Fixing findings
+
+Each finding carries remediation in every output format (`Remediation` in
+JSON, `help` and `properties.remediation` in SARIF):
+
+```
+[CRITICAL] github-pat GitHub personal access token  app/settings.py:5:17
+    secret:  ghp_C3J2REDACTED
+    fix:     rotate · Revoke the token (Settings > Developer settings > Tokens; ...) and review the org audit log.
+    better:  In Actions use the built-in GITHUB_TOKEN with least-privilege `permissions:`, and OIDC for cloud access.
+    code:    os.environ["GITHUB_TOKEN"]  (secretscan explain github-pat --lang python)
+```
+
+- `--remediation full` prints the step list and a complete code pattern for
+  the target store. `--remediation none` hides guidance.
+- `--secret-store env|vault|aws|azure|gcp` chooses the store (default from
+  `[remediation] store` in config).
+- `secretscan explain <rule-id> [--lang L|all] [--store S|all] [--env NAME]`
+  covers Python, Go, JS/TS, Java, C#, Ruby, PHP, shell, PowerShell,
+  Kubernetes, Terraform, Dockerfile, GitHub Actions, Azure Pipelines,
+  Spring, .NET config and .env.
+- `--fix` (with `dir <directory>` or `git --staged`) replaces quoted literals
+  in code with env lookups, adding `import os` / `"os"` where needed.
+  `--fix-patch FILE` writes the same change as a `git apply` patch. The patch
+  contains the old secrets, so it's created with 0600 permissions and you're
+  warned if it sits inside the repo. Unquoted values (YAML, `.env`) are listed
+  for manual moves to a secret store.
+- Verified-live findings sort first and say **REVOKE NOW**.
+
+Patterns follow the efficiency rules in
+[docs/using-secrets.md](docs/using-secrets.md): read once or cache with a TTL,
+share one client, refresh once on 401, keep the last good value if the store
+is unavailable, prefer mounted files over env vars for rotation, and never
+fetch per request. Snippets are syntax-checked in the test suite.
+
+```toml
+# .secretscan.toml: org defaults for guidance
+[remediation]
+store   = "azure"
+runbook = "https://wiki.example.com/platform/secrets-rotation"
+```
+
 ## Suppressing findings
 
 | Mechanism | Use for |
@@ -166,6 +214,9 @@ disables the heuristic filters below. Both are useful for audits.
     --verify                 check secrets against provider APIs
     --only-verified          report only live secrets (with --verify)
     --timeout DUR            abort after DUR
+    --remediation MODE       short | full | none (text output guidance)
+    --secret-store STORE     env | vault | aws | azure | gcp
+    --fix / --fix-patch FILE replace hard-coded literals with env lookups
     --no-color, -q/--quiet, --no-inline-ignore, --no-noise-filters
 dir:   --follow-symlinks
 git:   --staged | --pre-push [--remote NAME] | --log-opts "ARGS"

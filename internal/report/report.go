@@ -13,16 +13,23 @@ import (
 
 	"github.com/anirudh/secretscan/internal/config"
 	"github.com/anirudh/secretscan/internal/detect"
+	"github.com/anirudh/secretscan/internal/remediate"
 )
+
+// Options control rendering.
+type Options struct {
+	Color       bool
+	Remediation string // text: short (default) | full | none
+}
 
 // Formats lists supported report formats.
 var Formats = []string{"text", "json", "sarif", "csv", "junit"}
 
 // Write renders findings in the given format.
-func Write(w io.Writer, format string, fs []detect.Finding, rules []*config.CompiledRule, version string, color bool) error {
+func Write(w io.Writer, format string, fs []detect.Finding, rules []*config.CompiledRule, version string, o Options) error {
 	switch strings.ToLower(format) {
 	case "", "text":
-		return Text(w, fs, color)
+		return Text(w, fs, o)
 	case "json":
 		return JSON(w, fs)
 	case "sarif":
@@ -69,7 +76,8 @@ func sevColor(s string) string {
 }
 
 // Text writes a human-readable report.
-func Text(w io.Writer, fs []detect.Finding, color bool) error {
+func Text(w io.Writer, fs []detect.Finding, o Options) error {
+	color := o.Color
 	c := func(code, s string) string {
 		if !color {
 			return s
@@ -96,8 +104,13 @@ func Text(w io.Writer, fs []detect.Finding, color bool) error {
 			fmt.Fprintf(w, "    commit:  %s  %s <%s>  %s\n", short(f.Commit), f.Author, f.Email, f.Date)
 		}
 		if f.Verification != "" {
-			fmt.Fprintf(w, "    verify:  %s\n", f.Verification)
+			v := f.Verification
+			if v == "verified" {
+				v = c(cBold+cRed, "VERIFIED LIVE")
+			}
+			fmt.Fprintf(w, "    verify:  %s\n", v)
 		}
+		writeRemediation(w, f, o, c)
 		fmt.Fprintf(w, "    ignore:  %s\n\n", c(cDim, f.Fingerprint))
 	}
 	return nil
@@ -204,11 +217,12 @@ func SARIF(w io.Writer, fs []detect.Finding, rules []*config.CompiledRule, versi
 		Text string `json:"text"`
 	}
 	type rule struct {
-		ID                   string         `json:"id"`
-		Name                 string         `json:"name"`
-		ShortDescription     msg            `json:"shortDescription"`
-		DefaultConfiguration map[string]any `json:"defaultConfiguration"`
-		Properties           map[string]any `json:"properties,omitempty"`
+		ID                   string            `json:"id"`
+		Name                 string            `json:"name"`
+		ShortDescription     msg               `json:"shortDescription"`
+		DefaultConfiguration map[string]any    `json:"defaultConfiguration"`
+		Properties           map[string]any    `json:"properties,omitempty"`
+		Help                 map[string]string `json:"help,omitempty"`
 	}
 	used := map[string]bool{}
 	for _, f := range fs {
@@ -219,7 +233,7 @@ func SARIF(w io.Writer, fs []detect.Finding, rules []*config.CompiledRule, versi
 		if !used[r.ID] {
 			continue
 		}
-		srules = append(srules, rule{ID: r.ID, Name: r.ID, ShortDescription: msg{r.Description},
+		srules = append(srules, rule{ID: r.ID, Name: r.ID, ShortDescription: msg{r.Description}, Help: ruleHelp(r),
 			DefaultConfiguration: map[string]any{"level": sarifLevel(r.Severity)},
 			Properties:           map[string]any{"tags": append([]string{"security", "secret"}, r.Tags...), "security-severity": securitySeverity(r.Severity)}})
 	}
@@ -242,6 +256,9 @@ func SARIF(w io.Writer, fs []detect.Finding, rules []*config.CompiledRule, versi
 		}
 		if f.Verification != "" {
 			props["verification"] = f.Verification
+		}
+		if f.Remediation != nil {
+			props["remediation"] = f.Remediation
 		}
 		results = append(results, map[string]any{
 			"ruleId":              f.RuleID,
@@ -290,4 +307,77 @@ func securitySeverity(sev string) string {
 		return "3.0"
 	}
 	return "1.0"
+}
+
+func writeRemediation(w io.Writer, f detect.Finding, o Options, c func(string, string) string) {
+	g := f.Remediation
+	if g == nil || o.Remediation == "none" {
+		return
+	}
+	explain := fmt.Sprintf("secretscan explain %s", f.RuleID)
+	if g.Language != "" {
+		explain += " --lang " + g.Language
+	}
+	if g.Store != "" && g.Store != "env" {
+		explain += " --store " + g.Store
+	}
+	if o.Remediation == "full" {
+		fmt.Fprintf(w, "    fix (%s):\n", g.Family)
+		for i, s := range g.Steps {
+			fmt.Fprintf(w, "      %d. %s\n", i+1, s)
+		}
+		if snip, ok := remediate.Snippet(g.Language, g.Store, g.EnvVar); ok {
+			fmt.Fprintf(w, "      code (%s, %s):\n", g.Language, g.Store)
+			for _, l := range strings.Split(strings.TrimRight(snip, "\n"), "\n") {
+				fmt.Fprintf(w, "        %s\n", l)
+			}
+		}
+		return
+	}
+	urg := "rotate"
+	if g.Urgency == "revoke-now" {
+		urg = c(cBold+cRed, "REVOKE NOW")
+	} else if g.Urgency == "review" {
+		urg = "remove (already invalid)"
+	}
+	fmt.Fprintf(w, "    fix:     %s · %s\n", urg, firstSentence(g.Rotate))
+	if g.Eliminate != "" {
+		fmt.Fprintf(w, "    better:  %s\n", firstSentence(g.Eliminate))
+	}
+	if g.Replace != "" {
+		fmt.Fprintf(w, "    code:    %s  %s\n", g.Replace, c(cDim, "("+explain+")"))
+	} else {
+		fmt.Fprintf(w, "    code:    %s\n", c(cDim, explain))
+	}
+}
+
+// firstSentence cuts at the first ". X" that isn't an abbreviation like e.g.
+func firstSentence(s string) string {
+	for i := 0; i+2 < len(s); i++ {
+		if s[i] != '.' || s[i+1] != ' ' || !(s[i+2] >= 'A' && s[i+2] <= 'Z') {
+			continue
+		}
+		if prev := s[max(0, i-3):i]; strings.HasSuffix(prev, "e.g") || strings.HasSuffix(prev, "i.e") || strings.HasSuffix(prev, "etc") {
+			continue
+		}
+		return s[:i+1]
+	}
+	return s
+}
+
+// ruleHelp renders SARIF help for a rule from its remediation family.
+func ruleHelp(r *config.CompiledRule) map[string]string {
+	fam := remediate.FamilyFor(r.ID)
+	g := remediate.For(remediate.Input{RuleID: r.ID})
+	md := fmt.Sprintf("**%s** (%s)\n\n1. **Rotate:** %s\n2. **Avoid static secrets:** %s\n3. **Load at runtime:** inject `%s` from your secret store and read it once at startup (or cache with a TTL). Run `secretscan explain %s --lang <language>` for code.\n\nRemoving the line does not remove it from git history; rotation is the fix.",
+		r.Description, fam.Name, fam.Rotate, nonEmpty(fam.Eliminate, "keep it in a secret store"), g.EnvVar, r.ID)
+	text := fmt.Sprintf("%s. Rotate: %s %s", r.Description, fam.Rotate, fam.Eliminate)
+	return map[string]string{"text": text, "markdown": md}
+}
+
+func nonEmpty(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
 }

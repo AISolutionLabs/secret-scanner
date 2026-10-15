@@ -22,6 +22,7 @@ import (
 
 	"github.com/anirudh/secretscan/internal/config"
 	"github.com/anirudh/secretscan/internal/detect"
+	"github.com/anirudh/secretscan/internal/remediate"
 	"github.com/anirudh/secretscan/internal/report"
 	"github.com/anirudh/secretscan/internal/sources"
 	"github.com/anirudh/secretscan/internal/verify"
@@ -43,6 +44,7 @@ Usage:
         --pre-push               only commits being pushed (reads hook stdin)
         --log-opts "<args>"      extra git log args, e.g. "--since=1.week main"
   secretscan stdin              scan stdin (--diff to parse a unified diff)
+  secretscan explain <rule-id>  how to rotate, avoid and load a secret (--lang, --store)
   secretscan rules              list active rules
   secretscan validate           check config, regexes and rule self-tests
   secretscan install-hook       install git hooks (--type pre-commit|pre-push|both)
@@ -73,6 +75,8 @@ func main() {
 		code = runScan(ctx, "stdin", args)
 	case "rules":
 		code = runRules(args)
+	case "explain":
+		code = runExplain(args)
 	case "validate":
 		code = runValidate(args)
 	case "install-hook", "install-hooks":
@@ -152,6 +156,10 @@ type common struct {
 	noDefaults    bool
 	noInline      bool
 	noFilters     bool
+	secretStore   string
+	remediation   string
+	fixPatch      string
+	fixInPlace    bool
 	followLinks   bool
 	timeout       time.Duration
 
@@ -199,6 +207,10 @@ func bindCommon(fs *flag.FlagSet, c *common, mode string) {
 	}
 	fs.BoolVar(&c.noInline, "no-inline-ignore", false, "ignore inline allow comments (audit mode)")
 	fs.BoolVar(&c.noFilters, "no-noise-filters", false, "disable heuristic false-positive filters for generic rules (audit mode)")
+	fs.StringVar(&c.secretStore, "secret-store", "", "store the fix guidance targets: env|vault|aws|azure|gcp (default from config [remediation] store, else env)")
+	fs.StringVar(&c.remediation, "remediation", "short", "fix guidance in text output: short|full|none")
+	fs.StringVar(&c.fixPatch, "fix-patch", "", "write a git-apply-able patch replacing hard-coded literals with env lookups (contains the old secrets: keep it outside the repo)")
+	fs.BoolVar(&c.fixInPlace, "fix", false, "replace hard-coded literals with env lookups in place (dir or git --staged)")
 	fs.DurationVar(&c.timeout, "timeout", 0, "abort the scan after this long, e.g. 30s (0 = none)")
 	switch mode {
 	case "dir":
@@ -394,8 +406,44 @@ func runScan(ctx context.Context, mode string, args []string) int {
 			kept = v
 		}
 	}
+	// Fix guidance needs the raw secret and line, so it runs before redaction.
+	store := c.secretStore
+	if store == "" {
+		store = rs.Remediation.Store
+	}
+	for i := range kept {
+		f := &kept[i]
+		g := remediate.For(remediate.Input{RuleID: f.RuleID, File: f.File, Line: f.Line, Secret: f.Secret,
+			Verification: f.Verification, Store: store, Runbook: rs.Remediation.Runbook})
+		f.Remediation = &g
+	}
+	var fixSummary string
+	if c.fixPatch != "" || c.fixInPlace {
+		root := ""
+		switch {
+		case mode == "dir" && len(roots) == 1:
+			if fi, err := os.Stat(roots[0]); err == nil && fi.IsDir() {
+				root = roots[0]
+			}
+		case mode == "git" && c.staged:
+			root = repo
+		}
+		if root == "" {
+			fmt.Fprintln(os.Stderr, "secretscan: --fix/--fix-patch need `dir <one directory>` or `git --staged`")
+			return exitError
+		}
+		sum, err := applyFixes(c.fixPatch, c.fixInPlace, root, kept)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "secretscan: %v\n", err)
+			return exitError
+		}
+		fixSummary = sum
+	}
 	sort.SliceStable(kept, func(i, j int) bool {
 		a, b := kept[i], kept[j]
+		if (a.Verification == verify.Verified) != (b.Verification == verify.Verified) {
+			return a.Verification == verify.Verified // live secrets first
+		}
 		if a.File != b.File {
 			return a.File < b.File
 		}
@@ -435,7 +483,7 @@ func runScan(ctx context.Context, mode string, args []string) int {
 			fmt.Fprintf(os.Stderr, "secretscan: %v\n", err)
 			return exitError
 		}
-		werr := report.Write(out, format, kept, rs.Rules, version, false)
+		werr := report.Write(out, format, kept, rs.Rules, version, report.Options{Remediation: c.remediation})
 		if cerr := out.Close(); werr == nil {
 			werr = cerr
 		}
@@ -444,10 +492,10 @@ func runScan(ctx context.Context, mode string, args []string) int {
 			return exitError
 		}
 		if !c.quiet && format != "text" {
-			_ = report.Text(os.Stdout, kept, color)
+			_ = report.Text(os.Stdout, kept, report.Options{Color: color, Remediation: c.remediation})
 		}
 	} else if !c.quiet || format != "text" {
-		if err := report.Write(os.Stdout, format, kept, rs.Rules, version, color); err != nil {
+		if err := report.Write(os.Stdout, format, kept, rs.Rules, version, report.Options{Color: color, Remediation: c.remediation}); err != nil {
 			fmt.Fprintf(os.Stderr, "secretscan: %v\n", err)
 			return exitError
 		}
@@ -465,11 +513,14 @@ func runScan(ctx context.Context, mode string, args []string) int {
 	fmt.Fprintf(os.Stderr, "secretscan: %s · scanned %s (%s) in %s\n",
 		report.Summary(kept), scope, humanBytes(nBytes), time.Since(start).Round(time.Millisecond))
 
+	fmt.Fprint(os.Stderr, fixSummary)
 	if len(kept) > 0 {
 		if c.staged || c.prePush {
 			fmt.Fprint(os.Stderr, `
   Blocked. To fix:
-    • remove the secret and rotate it if it was ever pushed or shared
+    • move the value to your secret store and read it at runtime (see "code:" above;
+      --fix-patch fix.diff writes the change for you)
+    • rotate it if it was ever pushed or shared
     • false positive? add "secretscan:allow" in a comment on that line,
       or put the "ignore:" fingerprint in .secretscanignore
 `)
@@ -724,6 +775,139 @@ func runInstallHook(args []string) int {
 			return exitError
 		}
 		fmt.Printf("installed %s hook at %s\n", k, path)
+	}
+	return exitOK
+}
+
+// applyFixes builds the literal replacements and writes them as a patch
+// file, in place, or both. It returns a summary for stderr.
+func applyFixes(patchPath string, inPlace bool, root string, fs []detect.Finding) (string, error) {
+	seen := map[string]bool{}
+	var items []remediate.PatchItem
+	for _, f := range fs {
+		if f.Commit != "" || f.Decoded != "" || f.StartLine == 0 || strings.Contains(f.Secret, "\n") || f.Remediation == nil {
+			continue
+		}
+		k := fmt.Sprintf("%s:%d:%s", f.File, f.StartLine, f.SecretHash)
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		items = append(items, remediate.PatchItem{File: f.File, Line: f.StartLine, Secret: f.Secret, EnvVar: f.Remediation.EnvVar})
+	}
+	res := remediate.BuildPatch(root, items)
+	var b strings.Builder
+	if patchPath != "" {
+		// The diff's "-" lines contain the original secrets.
+		if err := os.WriteFile(patchPath, []byte(res.Diff), 0o600); err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&b, "secretscan: fix patch: %d literal(s) -> %s (apply from %s: git apply %s)\n", len(res.Patched), patchPath, root, patchPath)
+		if abs, err := filepath.Abs(patchPath); err == nil {
+			if r, err := filepath.Abs(root); err == nil && strings.HasPrefix(abs, r+string(filepath.Separator)) {
+				fmt.Fprintf(&b, "  warning: %s is inside the scanned tree and contains the old secrets; delete it after applying (or use --fix)\n", patchPath)
+			}
+		}
+	}
+	if inPlace {
+		for file, content := range res.Files {
+			p := filepath.Join(root, file)
+			info, err := os.Stat(p)
+			if err != nil {
+				return "", err
+			}
+			if err := os.WriteFile(p, []byte(content), info.Mode().Perm()); err != nil {
+				return "", err
+			}
+		}
+		fmt.Fprintf(&b, "secretscan: fixed %d literal(s) in %d file(s) in place\n", len(res.Patched), len(res.Files))
+	}
+	if len(res.EnvVars) > 0 {
+		fmt.Fprintf(&b, "  provide at runtime from your secret store: %s\n", strings.Join(res.EnvVars, ", "))
+	}
+	for _, s := range res.Skipped {
+		fmt.Fprintf(&b, "  manual: %s\n", s)
+	}
+	b.WriteString("  this only changes the code; rotate the credentials too (they remain in git history)\n")
+	return b.String(), nil
+}
+
+// runExplain prints rotation, keyless alternatives and loading code for a rule.
+func runExplain(args []string) int {
+	fs := flag.NewFlagSet("secretscan explain", flag.ContinueOnError)
+	lang := fs.String("lang", "", "language: "+strings.Join(remediate.Languages(), ", ")+" (or all)")
+	store := fs.String("store", "", "secret store: "+strings.Join(remediate.Stores, ", ")+" (or all)")
+	env := fs.String("env", "", "variable / secret name to use in snippets")
+	cfgPath := fs.String("config", "", "config file (for [remediation] defaults and custom rules)")
+	pos, err := parseInterleaved(fs, args)
+	if err != nil {
+		return exitError
+	}
+	if len(pos) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: secretscan explain <rule-id> [--lang python] [--store azure] [--env NAME]")
+		return exitError
+	}
+	ruleID := pos[0]
+	cfg, _, err := config.Resolve(config.Options{ConfigPath: *cfgPath, SearchDirs: []string{"."}})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "secretscan: %v\n", err)
+		return exitError
+	}
+	var desc string
+	for _, r := range cfg.Rules {
+		if r.ID == ruleID {
+			desc = r.Description
+		}
+	}
+	if desc == "" {
+		fmt.Fprintf(os.Stderr, "secretscan: unknown rule %q (see: secretscan rules)\n", ruleID)
+		return exitError
+	}
+	st := *store
+	if st == "" {
+		st = cfg.Remediation.Store
+	}
+	fam := remediate.FamilyFor(ruleID)
+	g := remediate.For(remediate.Input{RuleID: ruleID, Store: st, Runbook: cfg.Remediation.Runbook})
+	name := g.EnvVar
+	if *env != "" {
+		name = *env
+	}
+	fmt.Printf("%s  (%s)\n\n", desc, fam.Name)
+	fmt.Printf("1. Rotate\n   %s\n\n", fam.Rotate)
+	if fam.Eliminate != "" {
+		fmt.Printf("2. Remove the need for a static secret\n   %s\n\n", fam.Eliminate)
+	}
+	fmt.Printf("3. Load it at runtime as %s\n", name)
+	fmt.Println("   Read once at startup (or cache with a TTL shorter than rotation), share one client,")
+	fmt.Println("   refetch once on 401, never log it. Files from Vault Agent/CSI reload without restarts.")
+	if g.Runbook != "" {
+		fmt.Printf("\n   Runbook: %s\n", g.Runbook)
+	}
+	langs := []string{*lang}
+	if *lang == "" || *lang == "all" {
+		langs = remediate.Languages()
+		if *lang == "" {
+			langs = []string{"python", "go", "javascript", "java", "csharp", "kubernetes"}
+		}
+	}
+	stores := []string{st}
+	if st == "all" {
+		stores = remediate.Stores
+	}
+	for _, l := range langs {
+		for _, s := range stores {
+			snip, ok := remediate.Snippet(l, s, name)
+			if !ok {
+				fmt.Fprintf(os.Stderr, "secretscan: no snippets for language %q\n", l)
+				return exitError
+			}
+			label := s
+			if label == "" {
+				label = "env"
+			}
+			fmt.Printf("\n--- %s (%s) ---\n%s", l, label, snip)
+		}
 	}
 	return exitOK
 }

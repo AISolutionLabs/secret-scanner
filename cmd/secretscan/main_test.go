@@ -262,3 +262,91 @@ func TestHooksBlockCommitAndPush(t *testing.T) {
 		t.Errorf("optional mode should pass: %v %s", err, out)
 	}
 }
+
+func TestRemediationOutputs(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "app.py"), "import logging\nTOKEN = \""+pat()+"\"\n")
+	r := run(t, dir, "", "dir", ".", "-f", "json")
+	var fs []struct {
+		Remediation struct{ Urgency, Family, EnvVar, Replace, Language string }
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &fs); err != nil || len(fs) != 1 {
+		t.Fatalf("json: %v %s", err, r.stdout)
+	}
+	if g := fs[0].Remediation; g.Family != "GitHub" || g.EnvVar != "GITHUB_TOKEN" || g.Replace != `os.environ["GITHUB_TOKEN"]` || g.Urgency != "rotate" {
+		t.Errorf("remediation = %+v", g)
+	}
+	r = run(t, dir, "", "dir", ".")
+	if !strings.Contains(r.stdout, "code:    os.environ[\"GITHUB_TOKEN\"]") || !strings.Contains(r.stdout, "secretscan explain github-pat --lang python") {
+		t.Errorf("text remediation missing:\n%s", r.stdout)
+	}
+	r = run(t, dir, "", "dir", ".", "--remediation", "full", "--secret-store", "azure")
+	if !strings.Contains(r.stdout, "DefaultAzureCredential") || !strings.Contains(r.stdout, "1. Rotate:") {
+		t.Errorf("full remediation missing:\n%s", r.stdout)
+	}
+	r = run(t, dir, "", "dir", ".", "-f", "sarif")
+	if !strings.Contains(r.stdout, `"help"`) || !strings.Contains(r.stdout, `"remediation"`) {
+		t.Errorf("sarif help/remediation missing")
+	}
+	// Org defaults from config.
+	writeFile(t, filepath.Join(dir, ".secretscan.toml"), "[remediation]\nstore = \"vault\"\nrunbook = \"https://wiki.example.com/secrets\"\n")
+	r = run(t, dir, "", "dir", ".", "--remediation", "full")
+	if !strings.Contains(r.stdout, "hvac") || !strings.Contains(r.stdout, "wiki.example.com/secrets") {
+		t.Errorf("config store/runbook not applied:\n%s", r.stdout)
+	}
+}
+
+func TestExplain(t *testing.T) {
+	r := run(t, t.TempDir(), "", "explain", "azure-devops-pat", "--lang", "csharp", "--store", "azure")
+	if r.code != 0 || !strings.Contains(r.stdout, "workload identity federation") || !strings.Contains(r.stdout, "AddAzureKeyVault") {
+		t.Errorf("explain: %+v", r)
+	}
+	if r := run(t, t.TempDir(), "", "explain", "no-such-rule"); r.code != 2 {
+		t.Errorf("unknown rule should exit 2: %+v", r)
+	}
+	if r := run(t, t.TempDir(), "", "explain", "github-pat", "--lang", "all", "--store", "all"); r.code != 0 || strings.Count(r.stdout, "--- ") < 40 {
+		t.Errorf("explain all: code %d, %d sections", r.code, strings.Count(r.stdout, "--- "))
+	}
+}
+
+func TestFixStagedAndPatchWarning(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	repo := t.TempDir()
+	if out, err := gitCmd(t, repo, "init", "-q", "-b", "main"); err != nil {
+		t.Fatal(out)
+	}
+	writeFile(t, filepath.Join(repo, "svc/main.go"), "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tkey := \""+pat()+"\"\n\tfmt.Println(len(key))\n}\n")
+	if out, err := gitCmd(t, repo, "add", "."); err != nil {
+		t.Fatal(out)
+	}
+	r := run(t, repo, "", "git", "--staged", "--fix-patch", "fix.diff")
+	if !strings.Contains(r.stderr, "contains the old secrets") {
+		t.Errorf("expected in-tree patch warning: %s", r.stderr)
+	}
+	if fi, err := os.Stat(filepath.Join(repo, "fix.diff")); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("patch file should be 0600: %v", err)
+	}
+	os.Remove(filepath.Join(repo, "fix.diff"))
+	r = run(t, repo, "", "git", "--staged", "--fix")
+	if !strings.Contains(r.stderr, "fixed 1 literal(s)") {
+		t.Fatalf("fix: %s", r.stderr)
+	}
+	b, _ := os.ReadFile(filepath.Join(repo, "svc/main.go"))
+	if !strings.Contains(string(b), `os.Getenv("GITHUB_TOKEN")`) || !strings.Contains(string(b), `"os"`) {
+		t.Errorf("fixed file:\n%s", b)
+	}
+	writeFile(t, filepath.Join(repo, "svc/go.mod"), "module demo\n\ngo 1.24\n")
+	cmd := exec.Command("go", "vet", ".")
+	cmd.Dir = filepath.Join(repo, "svc")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Errorf("fixed Go code does not build: %s\n%s", out, b)
+	}
+	if r := run(t, repo, "", "dir", "."); r.code != 0 {
+		t.Errorf("rescan after fix should be clean: %s", r.stdout)
+	}
+	if r := run(t, repo, "", "git", "--fix"); r.code != 2 {
+		t.Errorf("--fix on history should be refused")
+	}
+}
