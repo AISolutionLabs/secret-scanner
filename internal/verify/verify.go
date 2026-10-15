@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package verify optionally checks whether detected secrets are live by
 // calling the issuing provider's read-only identity endpoint.
 //

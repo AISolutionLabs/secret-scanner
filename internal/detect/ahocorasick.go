@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package detect
 
 // matcher is a dense Aho-Corasick automaton over lowercase ASCII bytes. It

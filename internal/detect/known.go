@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package detect
 
 // knownPublic holds SHA-256 hashes of credentials that are published in

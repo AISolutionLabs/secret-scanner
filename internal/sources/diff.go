@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package sources turns files, git history and diffs into fragments.
 package sources
 

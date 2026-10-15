@@ -1,0 +1,44 @@
+secret-scanner
+Copyright 2026 The secret-scanner Authors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Third-party acknowledgements
+----------------------------
+
+gitleaks (https://github.com/gitleaks/gitleaks), MIT License,
+Copyright (c) 2019 Zachary Rice.
+  Several built-in rule patterns (for example the semi-generic
+  "keyword = value" pattern shape, the generic API key rule, and some
+  provider token formats) are modelled on gitleaks' rules, and the
+  configuration format is compatible with gitleaks configs.
+  The gitleaks MIT license requires the following notice:
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the
+    "Software"), to deal in the Software without restriction, including
+    without limitation the rights to use, copy, modify, merge, publish,
+    distribute, sublicense, and/or sell copies of the Software, and to
+    permit persons to whom the Software is furnished to do so, subject to
+    the following conditions:
+
+    The above copyright notice and this permission notice shall be included
+    in all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+    IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+    CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+detect-secrets (https://github.com/Yelp/detect-secrets), Apache License 2.0,
+and trufflehog (https://github.com/trufflesecurity/trufflehog), AGPL-3.0.
+  False-positive filtering techniques (charset-aware entropy limits,
+  sequential-string and UUID filters, gibberish scoring, word-based
+  filtering) were reimplemented from published descriptions of these
+  tools. No source code or word lists from either project are included.
+
+internal/wordy/table.go contains character-bigram statistics computed from
+the CPython standard library source; it contains no source text.

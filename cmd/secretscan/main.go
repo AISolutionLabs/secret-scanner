@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Command secretscan finds hard-coded secrets in files, git history, staged
 // changes, outgoing pushes and diffs.
 package main

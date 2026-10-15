@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package detect runs compiled rules over text fragments and produces findings.
 package detect
 

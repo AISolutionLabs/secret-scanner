@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package report renders findings as text, JSON, SARIF, CSV or JUnit XML.
 package report
 

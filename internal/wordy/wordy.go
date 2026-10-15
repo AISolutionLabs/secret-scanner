@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package wordy scores how much a string reads like natural-language or
 // programming words, using a character-bigram model. Random secrets score
 // low; identifiers like "isOnDemandRevalidate" or "SecurityProfiles" score high.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package config defines the scanner configuration schema (a superset of the
 // gitleaks v8 TOML format), loads and merges configs, and compiles rules.
 package config

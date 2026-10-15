@@ -1,5 +1,9 @@
 # secretscan
 
+[![ci](https://github.com/AISolutionLabs/secret-scanner/actions/workflows/ci.yml/badge.svg)](https://github.com/AISolutionLabs/secret-scanner/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Go Reference](https://pkg.go.dev/badge/github.com/AISolutionLabs/secret-scanner.svg)](https://pkg.go.dev/github.com/AISolutionLabs/secret-scanner)
+
 A fast, dependency-free secret scanner for files, git history, staged changes,
 outgoing pushes and raw diffs. It runs as a single static Go binary, so it
 fits pre-commit/pre-push hooks, CI and git push proxies alike.
@@ -30,6 +34,10 @@ fits pre-commit/pre-push hooks, CI and git push proxies alike.
 - **Reports** in text, JSON, SARIF 2.1.0, CSV and JUnit XML.
 
 ## Install
+
+Download a binary for Linux, macOS or Windows (amd64/arm64) from
+[Releases](https://github.com/AISolutionLabs/secret-scanner/releases) and
+verify it against `SHA256SUMS`, or build from source:
 
 ```sh
 go install github.com/AISolutionLabs/secret-scanner/cmd/secretscan@latest
@@ -339,3 +347,15 @@ go generate ./internal/wordy   # retrain the bigram model (default corpus: CPyth
 
 Test secrets are generated at runtime, so this repository contains no
 realistic tokens that would trip push protection on GitHub or Azure DevOps.
+
+## Contributing
+
+Issues and pull requests are welcome. False-positive and missed-secret
+reports are especially useful. See [CONTRIBUTING.md](CONTRIBUTING.md), and
+report vulnerabilities privately per [SECURITY.md](SECURITY.md).
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE) for
+third-party acknowledgements (several rule patterns are modelled on gitleaks,
+MIT).

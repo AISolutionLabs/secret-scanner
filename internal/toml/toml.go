@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package toml implements a dependency-free parser for the subset of TOML v1.0
 // used by scanner configuration files (including gitleaks-style configs):
 // tables, arrays of tables, dotted and quoted keys, all four string forms,

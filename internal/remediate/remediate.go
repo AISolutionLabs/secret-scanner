@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package remediate turns findings into actionable guidance: how urgent it
 // is, how to rotate the credential, how to stop needing it at all (keyless /
 // workload identity), and how to load it efficiently in the file's language.
