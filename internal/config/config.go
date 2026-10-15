@@ -61,7 +61,7 @@ type Allowlist struct {
 	Condition   string   `json:"condition"`
 	Commits     []string `json:"commits"`
 	Paths       []string `json:"paths"`
-	RegexTarget string   `json:"regexTarget"` // secret (default) | match | line
+	RegexTarget string   `json:"regexTarget"` // secret (default) | match | line | prefix (match text before the secret)
 	Regexes     []string `json:"regexes"`
 	Stopwords   []string `json:"stopwords"`
 	TargetRules []string `json:"targetRules"` // global allowlists only
@@ -381,6 +381,9 @@ type CompiledRule struct {
 	Allowlists []*CompiledAllowlist
 	Generic    bool // tagged "generic": yields to specific rules on overlap
 	Multiline  bool // regex can span lines; widens keyword windows
+	Bounded    bool // token rule: boundary chars are checked in code, not regex
+	Before     int  // keyword window radius before / after an occurrence
+	After      int
 	numGroups  int
 }
 
@@ -459,7 +462,24 @@ func compileRule(r Rule) (*CompiledRule, error) {
 	cr := &CompiledRule{Rule: r}
 	var err error
 	if r.Regex != "" {
-		if cr.Re, err = regexp.Compile(r.Regex); err != nil {
+		src := r.Regex
+		// Token rules wrap the token in boundary groups; matching the bare
+		// token keeps RE2's literal-prefix acceleration, and the detector
+		// checks the boundaries itself.
+		if strings.HasPrefix(src, TokPrefix) && strings.HasSuffix(src, TokSuffix) {
+			src = src[len(TokPrefix)-1 : len(src)-len(TokSuffix)+1]
+			cr.Bounded = true
+		}
+		cr.Before, cr.After = 256, 2048
+		if strings.Contains(src, SemiMarker) {
+			cr.Before, cr.After = 80, 1100
+		}
+		for _, t := range r.Tags {
+			if t == "generic" {
+				cr.Before, cr.After = 80, 300
+			}
+		}
+		if cr.Re, err = regexp.Compile(src); err != nil {
 			return nil, fmt.Errorf("rule %q: bad regex: %v", r.ID, err)
 		}
 		cr.numGroups = cr.Re.NumSubexp()
@@ -517,7 +537,7 @@ func compileAllowlist(a Allowlist, global bool) (*CompiledAllowlist, error) {
 	switch t := strings.ToLower(a.RegexTarget); t {
 	case "", "secret":
 		ca.Target = "secret"
-	case "match", "line":
+	case "match", "line", "prefix":
 		ca.Target = t
 	default:
 		return nil, fmt.Errorf("unknown regexTarget %q", a.RegexTarget)
@@ -596,6 +616,11 @@ func (a *CompiledAllowlist) Allowed(path, commit, secret, match, line string) bo
 			target = match
 		case "line":
 			target = line
+		case "prefix": // the identifier/operator part of the match, before the secret
+			target = match
+			if i := strings.Index(match, secret); i >= 0 && secret != "" {
+				target = match[:i]
+			}
 		}
 		ok := false
 		for _, re := range a.Regexes {

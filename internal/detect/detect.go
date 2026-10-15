@@ -9,12 +9,14 @@ import (
 	"math"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/anirudh/secretscan/internal/config"
+	"github.com/anirudh/secretscan/internal/wordy"
 )
 
 // Fragment is a unit of text to scan, with its origin.
@@ -62,6 +64,7 @@ type Finding struct {
 type Options struct {
 	MaxDecodeDepth int      // 0 disables base64/hex/percent decoding
 	IgnoreMarkers  []string // inline markers that suppress a finding on that line
+	NoNoiseFilters bool     // audit mode: disable heuristic false-positive filters
 }
 
 // DefaultIgnoreMarkers are recognized inline suppressions from common tools.
@@ -170,6 +173,7 @@ func (d *Detector) Detect(f Fragment) []Finding {
 func (d *Detector) hits(text, lower, path string) []hit {
 	var hs []hit
 	occ := d.ac.find(lower) // all keyword occurrences in one pass
+	dropInBlobs(text, occ)
 	for ri, rule := range d.rs.Rules {
 		if rule.Re == nil {
 			continue
@@ -179,7 +183,7 @@ func (d *Detector) hits(text, lower, path string) []hit {
 		}
 		windows := [][2]int{{0, len(text)}}
 		if len(rule.LowerKeys) > 0 {
-			windows = keywordWindows(lower, d.ruleKeys[ri], d.ac.lens, rule.Multiline, occ)
+			windows = keywordWindows(lower, d.ruleKeys[ri], d.ac.lens, rule, occ)
 			if len(windows) == 0 {
 				continue
 			}
@@ -187,16 +191,30 @@ func (d *Detector) hits(text, lower, path string) []hit {
 		for _, w := range windows {
 			sub := text[w[0]:w[1]]
 			for _, m := range rule.Re.FindAllStringSubmatchIndex(sub, -1) {
+				if rule.Bounded {
+					a, b := w[0]+m[0], w[0]+m[1]
+					if (a > 0 && config.IsTokenChar(text[a-1])) || (b < len(text) && config.IsTokenChar(text[b])) {
+						continue
+					}
+				}
 				s, e := secretSpan(rule, m)
 				if s < 0 || e <= s {
 					continue
 				}
 				secret := sub[s:e]
-				if rule.Generic && rule.Entropy > 0 && s > 0 && looksLikeIdentifier(secret, isQuote(sub[s-1])) {
-					continue // code reference such as crypto.SHA256 or KeyUsageCRLSign
+				quoted := s > 0 && isQuote(sub[s-1])
+				filters := !d.opts.NoNoiseFilters
+				if filters && rule.Generic && rule.Entropy > 0 && (looksLikeIdentifier(secret, quoted) || genericNoise(secret, quoted, path)) {
+					continue // code reference, words, path, UUID, kwargs...
 				}
 				ent := Shannon(secret)
-				if rule.Entropy > 0 && ent < rule.Entropy {
+				if rule.Entropy > 0 && ent < entropyFloor(rule, secret) {
+					continue
+				}
+				if filters && (isKnownPublic(secret) || (rule.Generic && isSequential(secret))) {
+					continue
+				}
+				if filters && rule.ID == "password-assignment" && weakPasswordNoise(secret) {
 					continue
 				}
 				hs = append(hs, hit{rule: rule, mStart: w[0] + m[0], mEnd: w[0] + m[1], sStart: w[0] + s, sEnd: w[0] + e,
@@ -209,32 +227,81 @@ func (d *Detector) hits(text, lower, path string) []hit {
 
 const multilineSpan = 16 << 10
 
+// blobMin is the length of an unbroken base64 run (embedded wasm, fonts,
+// images) beyond which keyword hits inside it are treated as chance.
+const blobMin = 64 << 10
+
+// dropInBlobs removes keyword occurrences that fall inside huge base64
+// blobs; random data contains short keywords like "sk" thousands of times.
+func dropInBlobs(text string, occ [][]int) {
+	if len(text) < blobMin {
+		return
+	}
+	var blobs [][2]int
+	scanRuns(text, isB64, blobMin, func(a, b int) { blobs = append(blobs, [2]int{a, b}) })
+	if len(blobs) == 0 {
+		return
+	}
+	for k, offs := range occ {
+		kept := offs[:0]
+		for _, o := range offs {
+			in := false
+			for _, bl := range blobs {
+				if o >= bl[0] && o < bl[1] {
+					in = true
+					break
+				}
+			}
+			if !in {
+				kept = append(kept, o)
+			}
+		}
+		occ[k] = kept
+	}
+}
+
 // keywordWindows returns merged, line-aligned [start,end) windows covering
 // each keyword occurrence plus one line of context on either side (or up to
 // 16 KiB after it for multi-line rules such as private keys).
-func keywordWindows(lower string, keys []int, lens []int, multiline bool, occ [][]int) [][2]int {
+func keywordWindows(lower string, keys []int, lens []int, rule *config.CompiledRule, occ [][]int) [][2]int {
+	multiline, windowBefore, windowAfter := rule.Multiline, rule.Before, rule.After
+	if windowBefore == 0 {
+		windowBefore, windowAfter = 256, 2048
+	}
 	var ws [][2]int
 	for _, ki := range keys {
 		offs := occ[ki]
 		for _, o := range offs {
-			s := strings.LastIndexByte(lower[:o], '\n') // start of keyword line - 1
-			if s > 0 {
-				s = strings.LastIndexByte(lower[:s], '\n') // previous line
+			// One line of context either side, but never more than a fixed
+			// radius: minified files can have multi-megabyte single lines.
+			lo := max(0, o-windowBefore) // bounded search keeps this linear
+			s := o
+			if j := strings.LastIndexByte(lower[lo:o], '\n'); j >= 0 { // start of keyword line - 1
+				s = lo + j
+				if k := strings.LastIndexByte(lower[lo:s], '\n'); k >= 0 { // previous line
+					s = lo + k + 1
+				} else {
+					s = lo
+				}
+			} else {
+				s = lo
 			}
-			s++
 			end := o + lens[ki]
+			limit := min(len(lower), end+windowAfter)
 			if multiline {
 				end = min(len(lower), o+multilineSpan)
+				limit = end
 			}
 			e := end
-			for n := 0; n < 2 && e < len(lower); n++ { // finish this line and the next
-				j := strings.IndexByte(lower[e:], '\n')
+			for n := 0; n < 2 && e < limit; n++ { // finish this line and the next
+				j := strings.IndexByte(lower[e:limit], '\n')
 				if j < 0 {
-					e = len(lower)
+					e = limit
 					break
 				}
 				e += j + 1
 			}
+			e = min(max(e, end), limit)
 			ws = append(ws, [2]int{s, e})
 		}
 	}
@@ -252,6 +319,199 @@ func keywordWindows(lower string, keys []int, lens []int, multiline bool, occ []
 		}
 	}
 	return merged
+}
+
+var envishPath = regexp.MustCompile(`(?i)(?:^|/)(?:\.env(?:\.[\w-]+)?|[\w.-]*\.env|[\w.-]*(?:dockerfile|containerfile)[\w.-]*)$|\.(?:ya?ml|properties|ini|conf|cfg|toml|sh|bash|zsh|ps1|tfvars|hcl|config|xml)$`)
+
+const pwSymbols = "!@#%^&*+~?$"
+
+// genericNoise applies structural filters (after gitleaks, detect-secrets
+// and trufflehog) to values caught by entropy-gated generic rules.
+func genericNoise(secret string, quoted bool, path string) bool {
+	core := strings.TrimRight(secret, "=")
+	if strings.Contains(core, "=") {
+		return true // kwargs / config pairs: func=submit_row, Region=eu-west-1
+	}
+	if isUUID(secret) {
+		return true // identifiers far more often than credentials
+	}
+	if numLiteral.MatchString(secret) || dateLike.MatchString(secret) || strings.Contains(secret, "...") || segmentsAreWords(secret) {
+		return true // numbers, timestamps, truncated doc examples, oauth-2025-04-20
+	}
+	hasDigit := strings.IndexFunc(secret, unicode.IsDigit) >= 0
+	if !hasDigit && isSingleCaseLetters(secret) {
+		return true // nextkeyfrompreviousresponse, SOMECONSTANT (gitleaks rejects all letter-only values)
+	}
+	w := wordy.Wordiness(secret)
+	if w >= 0.6 {
+		return true // made of words: SecurityProfiles, key-2024-primary
+	}
+	if !hasDigit && (strings.ContainsAny(secret, "./_-") || w >= 0.35) {
+		return true // digit-free dotted names and paths: esnext.map.group-by
+	}
+	if strings.ContainsAny(secret, pwSymbols) && !quoted && !envishPath.MatchString(path) {
+		return true // operators in code: a*b+c; symbols only count in literals/env files
+	}
+	return false
+}
+
+func isKnownPublic(secret string) bool {
+	sum := sha256.Sum256([]byte(secret))
+	return knownPublic[hex.EncodeToString(sum[:])]
+}
+
+// isSequential flags keyboard/alphabet runs like 0123456789 or abcdefgh,
+// directly or after base64-decoding (detect-secrets' sequential filter).
+func isSequential(secret string) bool {
+	check := func(s string) bool {
+		s = strings.ToLower(s)
+		run := 1
+		for i := 1; i < len(s); i++ {
+			if s[i] == s[i-1]+1 {
+				run++
+				if run >= 8 {
+					return true
+				}
+			} else {
+				run = 1
+			}
+		}
+		return false
+	}
+	if len(secret) < 8 {
+		return false
+	}
+	if check(secret) {
+		return true
+	}
+	if len(secret) >= 8 && len(secret)%4 == 0 {
+		if b, err := base64.StdEncoding.DecodeString(secret); err == nil && printable(string(b)) {
+			d := string(b)
+			// Encoded prose or JSON ("a secret", {"foo": "bar"}) is test data.
+			return check(d) || Shannon(d) < 3.0 || strings.ContainsAny(d, " {}") || wordy.Wordiness(d) >= 0.6
+		}
+	}
+	if strings.Count(secret, "%") >= 2 {
+		if d, err := url.QueryUnescape(secret); err == nil && d != secret {
+			return utf8.RuneCountInString(d) < 10 || Shannon(d) < 3.0
+		}
+	}
+	return false
+}
+
+var (
+	dateLike   = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}(?:[T ][\d:.]+(?:Z|[+-]\d{2}:?\d{2})?)?$`)
+	numLiteral = regexp.MustCompile(`^-?(?:0[xX][0-9a-fA-F]+|0[oO]?[0-7]+|0[bB][01]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)$`)
+)
+
+// segmentsAreWords reports values like "oauth-2025-04-20" or "v2-beta":
+// separator-delimited parts that are each numbers or dictionary-like words.
+func segmentsAreWords(s string) bool {
+	parts := strings.FieldsFunc(s, func(r rune) bool { return r == '-' || r == '_' || r == '.' })
+	if len(parts) < 2 {
+		return false
+	}
+	for _, p := range parts {
+		digits, letters := 0, 0
+		for i := 0; i < len(p); i++ {
+			switch c := p[i]; {
+			case c >= '0' && c <= '9':
+				digits++
+			case c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z':
+				letters++
+			}
+		}
+		switch {
+		case digits == len(p):
+		case letters == len(p) && (len(p) <= 3 || wordy.Score(p) > wordy.Threshold):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// weakPasswordNoise drops "passwords" that are really labels, error codes
+// or timestamps; leet-speak and mixed values (hunter2, s00pers3cret) stay.
+func weakPasswordNoise(v string) bool {
+	if dateLike.MatchString(v) || numLiteral.MatchString(v) || strings.Contains(v, "...") {
+		return true
+	}
+	hasDigit := strings.IndexFunc(v, unicode.IsDigit) >= 0
+	if !hasDigit && (strings.ContainsAny(v, "-_.") || wordy.Wordiness(v) >= 0.6) {
+		return true // invalid-password, INVALID_PASSWORD, mynewpassword
+	}
+	return segmentsAreWords(v)
+}
+
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < 36; i++ {
+		c := s[i]
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if c != '-' {
+				return false
+			}
+		} else if !isHexByte(c) {
+			return false
+		}
+	}
+	return true
+}
+
+// entropyFloor lowers the entropy gate for generic rules when the value's
+// alphabet is small (hex) or clearly mixed (3+ character classes), as
+// detect-secrets does with per-charset limits.
+func entropyFloor(rule *config.CompiledRule, secret string) float64 {
+	if !rule.Generic {
+		return rule.Entropy
+	}
+	if isAllHex(secret) || charClasses(secret) >= 3 {
+		return min(rule.Entropy, 3.0)
+	}
+	return rule.Entropy
+}
+
+func isSingleCaseLetters(s string) bool {
+	var lo, up bool
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+			lo = true
+		case c >= 'A' && c <= 'Z':
+			up = true
+		default:
+			return false
+		}
+	}
+	return lo != up
+}
+
+func charClasses(s string) int {
+	var lo, up, dg, sy bool
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+			lo = true
+		case c >= 'A' && c <= 'Z':
+			up = true
+		case c >= '0' && c <= '9':
+			dg = true
+		default:
+			sy = true
+		}
+	}
+	n := 0
+	for _, b := range []bool{lo, up, dg, sy} {
+		if b {
+			n++
+		}
+	}
+	return n
 }
 
 func isQuote(c byte) bool { return c == '"' || c == '\'' || c == '`' }
@@ -373,13 +633,7 @@ func (d *Detector) allowed(rule *config.CompiledRule, f Fragment, secret, match,
 // inlineIgnored checks the lines spanned by the secret (and the line before,
 // for the allow-next-line marker).
 func (d *Detector) inlineIgnored(text string, s, e int) bool {
-	ls := strings.LastIndexByte(text[:s], '\n') + 1
-	le := strings.IndexByte(text[e:], '\n')
-	if le < 0 {
-		le = len(text)
-	} else {
-		le += e
-	}
+	ls, le := lineBounds(text, s, e, 512)
 	span := strings.ToLower(text[ls:le])
 	for _, m := range d.opts.IgnoreMarkers {
 		if strings.Contains(span, m) {
@@ -396,14 +650,24 @@ func (d *Detector) inlineIgnored(text string, s, e int) bool {
 }
 
 func lineText(text string, off int) string {
-	ls := strings.LastIndexByte(text[:off], '\n') + 1
-	le := strings.IndexByte(text[off:], '\n')
-	if le < 0 {
-		le = len(text)
-	} else {
-		le += off
-	}
+	ls, le := lineBounds(text, off, off, 1024)
 	return strings.TrimRight(text[ls:le], "\r")
+}
+
+// lineBounds returns the line around [s,e), clipped to radius bytes on each
+// side so minified multi-megabyte lines stay cheap.
+func lineBounds(text string, s, e, radius int) (int, int) {
+	lo := max(0, s-radius)
+	ls := lo
+	if j := strings.LastIndexByte(text[lo:s], '\n'); j >= 0 {
+		ls = lo + j + 1
+	}
+	hi := min(len(text), e+radius)
+	le := hi
+	if j := strings.IndexByte(text[e:hi], '\n'); j >= 0 {
+		le = e + j
+	}
+	return ls, le
 }
 
 func (d *Detector) newFinding(rule *config.CompiledRule, f Fragment, h hit, s, e int, decoded string) Finding {

@@ -171,6 +171,7 @@ func samples() map[string]sample {
 		"connection-string-password":       s("Server=tcp:h,1433;User ID=sa;Password=" + g(alnum, 14) + ";Encrypt=True;"),
 		"sensitive-file":                   {text: "anything", path: "keys/id_rsa"},
 		"generic-api-key":                  s(`api_secret = "` + g(alnum, 32) + `"`),
+		"xml-config-secret":                s(`<add key="StorageToken" value="` + g(alnum, 24) + `" />`),
 		"password-assignment":              s(`db_password = "` + "Tr0ub4dor&3" + `"`),
 	}
 }
@@ -434,6 +435,102 @@ func TestProseAndURLValuesNotFlagged(t *testing.T) {
 	} {
 		if fs := d.Detect(detect.Fragment{Raw: line, FilePath: "a.go"}); len(fs) > 0 {
 			t.Errorf("false positive on %q: %v", line, ids(fs))
+		}
+	}
+}
+
+func TestV3NoiseFilters(t *testing.T) {
+	d := defaultDetector(t, 2)
+	for _, line := range []string{
+		`      "result_key": "DBSubnetGroups"`,
+		` *   KeyMarker: "nextkeyfrompreviousresponse",`,
+		`OAUTH_API_BETA_HEADER = "oauth-2025-04-20"`,
+		"\tSIOCGLIFTOKEN                 = -0x3f879678",
+		`    readonly INVALID_PASSWORD: "invalid-password";`,
+		`              "PasswordLastUsed": "2016-09-08T21:47:36Z",`,
+		`CPK_KEY_VALUE = "MDEyMzQ1NjcwMTIzNDU2NzAxMjM0NTY3MDEyMzQ1Njc="`,
+		`  "PurchaseToken": "eyJ2IjoiMSIsInMiOjEsImMiOi...",`,
+		`engine = create_engine("mssql+pyodbc://scott:tiger@some_dsn")`,
+		`f"http://{ENCODED_USER}:{ENCODED_PASSWORD}@request.com/url.html"`,
+		`DEVSTORE = "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=` +
+			"Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/" + `KBHBeksoGMGw==;"`,
+		`api_key = "abcdefghijklmnop1234"`,
+	} {
+		if fs := d.Detect(detect.Fragment{Raw: line, FilePath: "x.py"}); len(fs) > 0 {
+			t.Errorf("noise not filtered: %q -> %v %q", line, ids(fs), fs[0].Secret)
+		}
+	}
+	// Still caught: leet passwords, symbol passwords in env files, short-alphabet hex.
+	for line, rule := range map[string]string{
+		`db_password = "s00pers3cret"`:               "password-assignment", // secretscan:allow (test fixture)
+		`ENV ADMIN_PASSWORD=Wuy8vDv-a*+Q7Xtzp8+`:     "generic-api-key",
+		`token = "db9ed2a829b6e9e3a60e5a0eb0e1526c"`: "generic-api-key", // secretscan:allow (test fixture)
+		`  password: 5ydbL_XwX4E9`:                   "generic-api-key", // secretscan:allow (test fixture)
+		`const credentials = 'Et69DS8GOzI_Ck1!UL';`:  "generic-api-key", // secretscan:allow (test fixture)
+	} {
+		path := "app.py"
+		if strings.HasPrefix(line, "ENV") {
+			path = "Dockerfile"
+		} else if strings.HasPrefix(line, "  password") {
+			path = "values.yaml"
+		}
+		if fs := d.Detect(detect.Fragment{Raw: line, FilePath: path}); !has(fs, rule) {
+			t.Errorf("missed %q (%s): %v", line, rule, ids(fs))
+		}
+	}
+}
+
+func TestV4NoiseFiltersAndRecall(t *testing.T) {
+	d := defaultDetector(t, 2)
+	for _, line := range []string{
+		`    "NextToken": "JqBdtVdGsvMjUysyEgwy/jVBCGAjj9G4/ivkfsXHt9A=",`,
+		`               "AccessPointName": "myaccesspoint--abcd-ab1--xa-s3",`,
+		`            "clientSecret": "YSBzZWNyZXQ=",`,
+		`        token = 'eyJmb28iOiAiYmFyIn0='`,
+		`            'ContinuationToken': "%C3%A7%C3%B6s%25%20asd%08+c",`,
+		`    const password = parsedURL.password;`,
+		`        "PWD=(whatever);"`,
+		`        "token": "mF_9.B5f-4.1JqM",`,
+	} {
+		if fs := d.Detect(detect.Fragment{Raw: line, FilePath: "x.py"}); len(fs) > 0 {
+			t.Errorf("noise not filtered: %q -> %v %q", line, ids(fs), fs[0].Secret)
+		}
+	}
+	for line, path := range map[string]string{
+		`  jwt_secret: "ZcoN0HMupgdPhqEjT+GJh5vq6PACZZ1KNOlktT9iV0g="`:                    "values.yml", // secretscan:allow (test fixture)
+		`ENV SESSION_SECRET=Sj6l!buX3C-E%@WC`:                                             "0176-app-Dockerfile",
+		`Data Source=sql1;Initial Catalog=app;User ID=svc;Password=` + g(alnum, 14) + `;`: "app.config",
+	} {
+		if fs := d.Detect(detect.Fragment{Raw: line, FilePath: path}); len(fs) == 0 {
+			t.Errorf("missed %q", line)
+		}
+	}
+}
+
+func TestXMLConfigAndSymbolPasswords(t *testing.T) {
+	d := defaultDetector(t, 0)
+	hits := map[string]string{
+		`    <add key="LITELLM_MASTER_KEY" value="sk-sIJpLWZVcdAbmaJTc5dg1u" />`: "web.config", // secretscan:allow (test fixture)
+		`    <add key="admin.pass" value="3FKq&nVJRzf#oL0" />`:                   "web.config", // secretscan:allow (test fixture)
+		`<server><id>nexus</id><password>Zq8!vR2#pLm9xT</password></server>`:     "settings.xml",
+		`password = puJeBew?Cq$3cdm$JvmR24`:                                      "settings.ini",
+		"export const redisPassword = `vO?!E#sKameh2`;":                          "env.ts", // secretscan:allow (test fixture)
+	}
+	for line, path := range hits {
+		if fs := d.Detect(detect.Fragment{Raw: line, FilePath: path}); len(fs) == 0 {
+			t.Errorf("missed %q", line)
+		} else if strings.Contains(fs[0].Secret, "<") || strings.Contains(fs[0].Secret, "key=") {
+			t.Errorf("bad secret span %q", fs[0].Secret)
+		}
+	}
+	for _, line := range []string{
+		`    <add key="TokenEndpoint" value="https://login.example.com/token" />`,
+		`    <add key="ClientSecret" value="$(ClientSecret)" />`,
+		`<password>${env.NEXUS_PASSWORD}</password>`,
+		`    <add key="PasswordMinLength" value="12" />`,
+	} {
+		if fs := d.Detect(detect.Fragment{Raw: line, FilePath: "web.config"}); len(fs) > 0 {
+			t.Errorf("noise: %q -> %v %q", line, ids(fs), fs[0].Secret)
 		}
 	}
 }

@@ -11,9 +11,11 @@ fits pre-commit/pre-push hooks, CI and git push proxies alike.
 - **Custom patterns**: via TOML config, `--pattern` flags or a patterns file.
 - **Drop-in gitleaks compatibility**: config schema, fingerprints, `.gitleaksignore`,
   `gitleaks:allow` and JSON report shape all carry over.
-- **Low noise**: keyword prefilters, Shannon entropy gates, allowlists
-  (paths, regexes, stopwords, commits, AND/OR, per-rule or global), placeholder and
-  code-identifier suppression, and specific rules taking precedence over generic ones.
+- **Low noise, high recall**: on the [benchmark](#benchmark) it finds more
+  secrets than gitleaks or detect-secrets with equal or less noise. A
+  character-level language model and structural filters reject identifiers,
+  words, paths, hashes, UUIDs and published sample credentials. See
+  [How noise is filtered](#how-noise-is-filtered).
 - **Finds hidden secrets**: recursively decodes base64, hex and percent-encoding.
 - **Safe output**: secrets are redacted by default (80% masked); reports
   carry a SHA-256 of each secret so baselines work without storing secrets.
@@ -137,7 +139,8 @@ config changes. `secretscan rules [--tag aws] [-f json]` lists the active rules.
 | `[[allowlists]]` / `[rules.allowlist]` in config | structured, reviewable policy |
 | `--exclude-path REGEX` | ad-hoc path skips |
 
-`--no-inline-ignore` disables inline markers, which is useful for audits.
+`--no-inline-ignore` disables inline markers, and `--no-noise-filters`
+disables the heuristic filters below. Both are useful for audits.
 
 ## Options
 
@@ -163,7 +166,7 @@ config changes. `secretscan rules [--tag aws] [-f json]` lists the active rules.
     --verify                 check secrets against provider APIs
     --only-verified          report only live secrets (with --verify)
     --timeout DUR            abort after DUR
-    --no-color, -q/--quiet, --no-inline-ignore
+    --no-color, -q/--quiet, --no-inline-ignore, --no-noise-filters
 dir:   --follow-symlinks
 git:   --staged | --pre-push [--remote NAME] | --log-opts "ARGS"
 stdin: --diff, --label NAME
@@ -203,12 +206,76 @@ A non-zero exit means reject the push, and the JSON tells the proxy what to repo
 in hooks, and in locked-down networks expect `error`. Standard `HTTPS_PROXY`
 and system CA settings are honored.
 
+## Benchmark
+
+`bench/` compares secretscan with gitleaks (v8, built from source July 2026) and
+detect-secrets 1.5.0, with default settings for every tool:
+
+- **Labeled sets:** generated secrets at known lines inside realistic files,
+  including hard negatives such as commit SHAs, digests, UUIDs, `${VAR}`
+  templates and AWS doc keys. The *tuning* set has 329 secrets in 10 formats.
+  The *held-out* set has 160 secrets in 12 other formats (Java, C#, Kotlin,
+  web.config, .properties, INI, Helm, GitHub Actions, ...) and was never used
+  for tuning.
+- **Real-world corpora:** popular packages that shouldn't contain live
+  secrets, so every finding is noise or a published example credential.
+  These are 28 npm/PyPI packages (700 MB) plus the Go standard library for
+  tuning, and 24 different packages (200 MB) held out.
+
+| Held-out (never tuned on) | Recall | Precision | npm findings | PyPI findings | Time (npm + PyPI) |
+|---|---|---|---|---|---|
+| **secretscan** | **100%** (96.9% before held-out fixes) | 100% | 6 | 29 | **8 s** |
+| gitleaks | 85.0% | 100% | 5 | 30 | 106 s |
+| detect-secrets | 73.8% | 76.6% | 616 | 37 | 746 s |
+
+| Tuning set | Recall | Precision | npm | PyPI | Go stdlib | Time (all three corpora) |
+|---|---|---|---|---|---|---|
+| secretscan v1 (before this work)¹ | 96.0% | 84.5% | 628 | 1009 | 80 | 53 s |
+| **secretscan** | **100%** | **100%** | **4** | **60** | **74** | **51 s** |
+| gitleaks | 82.4% | 91.9% | 35 | 239 | 82 | 416 s |
+| detect-secrets (labeled set only) | 73.6% | 53.1% | – | – | – | – |
+
+¹ v1 timed with the windowing fixes from this round; as originally shipped it needed over 10 minutes on the npm corpus because of minified files.
+
+What's left on the real-world corpora is mostly genuine-looking example
+credentials: AWS documentation JSON, test fixtures with random keys, and
+private keys or ECDH test vectors in Go's crypto tests. A secret scanner should
+report these. gitleaks misses credentials in URLs and connection strings, Azure
+SAS tokens, legacy Azure DevOps PATs and Datadog/Sentry keys. detect-secrets'
+entropy plugins flag hex and base64 blobs everywhere. Times are on 2 vCPUs.
+
+Reproduce with `bench/fetch-corpus.sh && python3 bench/run.py && HOLDOUT=1 python3 bench/run.py`.
+
+## How noise is filtered
+
+Provider rules with distinctive prefixes (`ghp_`, `AKIA`, `xoxb-`, ...) are
+precise on their own. Nearly all noise comes from generic "keyword = value"
+rules. Their values must pass these checks, adapted from what each tool does well:
+
+| Filter | Rejects | Idea from |
+|---|---|---|
+| Character-bigram language model ("gibberish" score, `internal/wordy`), trained on CPython source | `SecurityProfiles`, `isOnDemandRevalidate`, `key-2024-primary` | detect-secrets (gibberish), trufflehog (word lists) |
+| Code-identifier shape | `crypto.SHA256`, `KeyUsageCRLSign`, `C.GO_RSA_PADDING` | gitleaks (`^[a-zA-Z_.-]+$`) |
+| Structure: `=` inside value, UUIDs, numbers, timestamps, `oauth-2025-04-20`, `...` truncation | kwargs, config pairs, IDs, versions | detect-secrets |
+| Sequential / decoded-prose values | `0123456789…`, base64 of `a secret` or `{"foo":"bar"}` | detect-secrets |
+| Key name says it isn't a secret (matched before the value) | `public_key_id`, `NextToken`, `*Name`, `*Url`, `sha256`, `nonce` | gitleaks (match allowlist) |
+| Published sample credentials (stored as SHA-256) | AWS doc keys, Azure Storage emulator key, jwt.io token, Stripe doc keys | trufflehog, gitleaks |
+| Charset-aware entropy floor | (raises recall) random hex at 3.0 bits, mixed-class passwords | detect-secrets |
+| Symbols only in literals and env-style files | `a*b+c` in code; keeps `P@ss!...` in `.env`, YAML, Dockerfile | — |
+| Specific rule wins over generic on overlap | duplicate reports | gitleaks |
+
+Each filter is a few lines in `internal/detect/detect.go` with regression
+tests drawn from real false positives. `--no-noise-filters` turns them off
+for audits.
+
 ## Performance
 
-Rules only run their regex on line windows around keyword hits, which are found in
-one Aho-Corasick pass. Decoding candidates come from byte scanners rather than regexes.
-On 2 vCPUs, the Go standard library source (9,952 files, 92 MB) scans in about 8 s
-with decoding on. A typical pre-commit takes a few milliseconds.
+All keywords are found in one Aho-Corasick pass, and each rule's regex then
+runs only in a bounded window around its hits. Token rules keep RE2's
+literal-prefix fast path: boundary checks happen in code, not in the regex.
+Decoding candidates come from byte scanners, and huge embedded base64 blobs
+are skipped. The Go stdlib (92 MB) scans in under 3 s on 2 vCPUs, and a typical
+pre-commit takes a few milliseconds.
 
 ## Development
 
@@ -216,6 +283,7 @@ with decoding on. A typical pre-commit takes a few milliseconds.
 make test     # unit + end-to-end (real git repos, hooks, bare remote)
 make bench
 make validate # check the example config
+go generate ./internal/wordy   # retrain the bigram model (default corpus: CPython stdlib)
 ```
 
 Test secrets are generated at runtime, so this repository contains no

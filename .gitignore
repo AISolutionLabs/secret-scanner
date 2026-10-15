@@ -4,3 +4,4 @@ dist/
 secretscan-report.*
 *.test
 *.out
+bench/work/

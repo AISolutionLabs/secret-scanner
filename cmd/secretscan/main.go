@@ -151,6 +151,7 @@ type common struct {
 	quiet         bool
 	noDefaults    bool
 	noInline      bool
+	noFilters     bool
 	followLinks   bool
 	timeout       time.Duration
 
@@ -197,6 +198,7 @@ func bindCommon(fs *flag.FlagSet, c *common, mode string) {
 		fs.BoolVar(&c.quiet, n, false, "print only the summary")
 	}
 	fs.BoolVar(&c.noInline, "no-inline-ignore", false, "ignore inline allow comments (audit mode)")
+	fs.BoolVar(&c.noFilters, "no-noise-filters", false, "disable heuristic false-positive filters for generic rules (audit mode)")
 	fs.DurationVar(&c.timeout, "timeout", 0, "abort the scan after this long, e.g. 30s (0 = none)")
 	switch mode {
 	case "dir":
@@ -499,7 +501,7 @@ func buildDetector(c common, searchDirs []string) (*detect.Detector, *config.Rul
 		fmt.Fprintf(os.Stderr, "secretscan: unknown --min-severity %q\n", c.minSeverity)
 		return nil, nil, exitError
 	}
-	dopts := detect.Options{MaxDecodeDepth: c.decodeDepth}
+	dopts := detect.Options{MaxDecodeDepth: c.decodeDepth, NoNoiseFilters: c.noFilters}
 	if c.noInline {
 		dopts.IgnoreMarkers = []string{}
 	}

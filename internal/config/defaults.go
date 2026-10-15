@@ -7,7 +7,19 @@ import "strings"
 // Base64 punctuation (+ /) is excluded on both sides so tokens are not
 // "found" in the middle of encoded blobs.
 func tok(secret string) string {
-	return `(?:^|[^0-9A-Za-z_+/-])(` + secret + `)(?:[^0-9A-Za-z_+/-]|$)`
+	return TokPrefix + secret + TokSuffix
+}
+
+// Token-rule wrapper and semi-generic marker, recognized by the compiler.
+const (
+	TokPrefix  = `(?:^|[^0-9A-Za-z_+/-])(`
+	TokSuffix  = `)(?:[^0-9A-Za-z_+/-]|$)`
+	SemiMarker = `[\w.-]{0,50}?(?i:`
+)
+
+// IsTokenChar reports whether c can continue a token (for boundary checks).
+func IsTokenChar(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c == '_' || c == '+' || c == '/' || c == '-'
 }
 
 // semi builds a "keyword near an assignment" regex (same idea as gitleaks'
@@ -55,7 +67,7 @@ func DefaultRules() []Rule {
 			`(?i)AccountKey=([A-Za-z0-9+/]{86}==)`, []string{"accountkey"}, "azure", "cloud"),
 		withEntropy(r("azure-storage-account-key", "Azure Storage account key", "critical",
 			semi([]string{`account_?key`, `storage_?(?:account_?)?key`, `azure_?storage_?key`, `primary_?key`}, `[A-Za-z0-9+/]{86}==`, false),
-			[]string{"key"}, "azure", "cloud"), 4.0),
+			[]string{"accountkey", "account_key", "storagekey", "storage_key", "storageaccountkey", "storage_account_key", "azure_storage_key", "primarykey", "primary_key"}, "azure", "cloud"), 4.0),
 		r("azure-sas-token", "Azure shared access signature", "high",
 			`(?i)[?&]sig=([A-Za-z0-9%+/]{40,}(?:%3D){0,2}=?)`, []string{"sig="}, "azure", "cloud"),
 		r("azure-devops-pat", "Azure DevOps personal access token", "critical",
@@ -97,7 +109,7 @@ func DefaultRules() []Rule {
 			semi([]string{`heroku`}, uuid, false), []string{"heroku"}, "cloud"),
 		r("cloudflare-api-token", "Cloudflare API token or global key", "high",
 			semi([]string{`cloudflare`, `cf_?api`, `cf_?token`}, `[A-Za-z0-9_-]{40}|[a-f0-9]{37}`, false),
-			[]string{"cloudflare", "cf_"}, "cloud"),
+			[]string{"cloudflare", "cf_api", "cfapi", "cf_token", "cftoken"}, "cloud"),
 		r("alibaba-access-key-id", "Alibaba Cloud access key ID", "high",
 			tok(`LTAI[a-zA-Z0-9]{20}`), []string{"ltai"}, "cloud"),
 		r("ibm-cloud-api-key", "IBM Cloud API key", "high",
@@ -180,7 +192,7 @@ func DefaultRules() []Rule {
 		r("langsmith-api-key", "LangSmith / LangChain API key", "high",
 			tok(`lsv2_(?:pt|sk)_[a-f0-9]{32}_[a-f0-9]{10}`), []string{"lsv2_"}, "ai"),
 		withEntropy(r("cohere-api-key", "Cohere API key", "high",
-			semi([]string{`cohere(?:_?api)?_?key`, `co_?api_?key`}, `[A-Za-z0-9]{40}`, false), []string{"co"}, "ai"), 3.5),
+			semi([]string{`cohere(?:_?api)?_?key`, `co_?api_?key`}, `[A-Za-z0-9]{40}`, false), []string{"cohere", "co_api", "coapi"}, "ai"), 3.5),
 		withEntropy(r("mistral-api-key", "Mistral API key", "high",
 			semi([]string{`mistral(?:_?api)?_?key`}, `[A-Za-z0-9]{32}`, false), []string{"mistral"}, "ai"), 3.5),
 		withEntropy(r("deepseek-api-key", "DeepSeek API key", "high",
@@ -194,7 +206,7 @@ func DefaultRules() []Rule {
 			`(?i)snowflake://[^:/\s]+:([^@/\s]{6,})@`, []string{"snowflake://"}, "data"),
 		withEntropy(r("datadog-key", "Datadog API or application key", "high",
 			semi([]string{`datadog(?:_?(?:api|app(?:lication)?))?_?key`, `dd_?(?:api|app)_?key`}, `[a-f0-9]{32}|[a-f0-9]{40}`, false),
-			[]string{"datadog", "dd_"}, "observability"), 3.0),
+			[]string{"datadog", "dd_api", "dd_app", "ddapi", "ddapp"}, "observability"), 3.0),
 		r("grafana-cloud-api-token", "Grafana Cloud API token", "high", tok(`glc_[A-Za-z0-9+/]{32,400}={0,2}`), []string{"glc_"}, "observability"),
 		r("grafana-service-account-token", "Grafana service account token", "high",
 			tok(`glsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8}`), []string{"glsa_"}, "observability"),
@@ -203,9 +215,9 @@ func DefaultRules() []Rule {
 			`(?i)\b(NR(?:AK|II|JS)-[A-Z0-9_-]{27,32})(?:[^0-9A-Za-z_-]|$)`, []string{"nrak-", "nrii-", "nrjs-"}, "observability"),
 		r("sentry-token", "Sentry auth token", "high", tok(`sntry[su]_[A-Za-z0-9+/=_]{40,}`), []string{"sntrys_", "sntryu_"}, "observability"),
 		r("splunk-hec-token", "Splunk HTTP Event Collector token", "medium",
-			semi([]string{`splunk(?:_?hec)?_?token`, `hec_?token`}, uuid, false), []string{"splunk", "hec"}, "observability"),
+			semi([]string{`splunk(?:_?hec)?_?token`, `hec_?token`}, uuid, false), []string{"splunk", "hec_token", "hectoken"}, "observability"),
 		r("pagerduty-token", "PagerDuty API token", "medium",
-			semi([]string{`pagerduty(?:_?api)?_?(?:token|key)`, `pd_?token`}, `[A-Za-z0-9_+-]{20}`, false), []string{"pagerduty", "pd_"}, "observability"),
+			semi([]string{`pagerduty(?:_?api)?_?(?:token|key)`, `pd_?token`}, `[A-Za-z0-9_+-]{20}`, false), []string{"pagerduty", "pd_token", "pdtoken"}, "observability"),
 		r("honeycomb-api-key", "Honeycomb API key", "medium",
 			semi([]string{`honeycomb(?:_?api)?_?key`, `x-honeycomb-team`}, `hc[a-z]{2}_[a-z0-9]{58}|[A-Za-z0-9]{22,32}`, false), []string{"honeycomb"}, "observability"),
 
@@ -262,13 +274,17 @@ func DefaultRules() []Rule {
 			Regex:    `\b[a-zA-Z][a-zA-Z0-9+.-]{1,20}://[^:/?#@\s'"\x60]{1,64}:([^@/?#\s'"\x60]{3,128})@[a-zA-Z0-9.-]+`,
 			Keywords: []string{"://"}, Tags: []string{"credentials", "url"},
 			Allowlists: []Allowlist{
-				{Description: "placeholder passwords", Regexes: []string{`(?i)^(?:pass(?:word)?|passwd|pwd|secret|pw|test|admin|user(?:name)?|guest|root|xxx+|\*+|token|apikey|my%20pass)$`}},
-				{Description: "documentation hosts", RegexTarget: "match", Regexes: []string{`(?i)@(?:[\w-]+\.)*(?:example\.(?:com|org|net)|localhost|faketld|test|invalid|local)(?:[:/]|$)`}},
+				placeholderValues,
+				{Description: "documentation hosts", RegexTarget: "match", Regexes: []string{`(?i)@(?:(?:[\w-]+\.)*(?:example\.(?:com|org|net)|localhost|faketld|test|invalid|local)|host|hostname|myhost|some_?dsn|your[\w.-]*)(?:[:/]|$)`}},
 			}},
 		r("jdbc-password", "Password in JDBC URL", "high",
 			`(?i)jdbc:[a-z0-9]+:[^\s"']*?[;?&]password=([^;&\s"']{4,})`, []string{"jdbc:"}, "credentials"),
-		r("connection-string-password", "Password in key=value connection string", "medium",
-			`(?i)(?:^|[;"'\s])(?:password|pwd)\s*=\s*([^;"'\s{}$]{4,})\s*;`, []string{"password", "pwd"}, "credentials"),
+		{ID: "connection-string-password", Description: "Password in a key=value connection string", Severity: "medium",
+			// Needs connection-string context (server/host/data source/...) on
+			// the same line, so code like password = url.password; is ignored.
+			Regex:    `(?i)(?:(?:server|data source|host|address|addr|endpoint|hostname|uid|user id|database|initial catalog)\s*=[^\n]{0,200}?(?:^|[;"'\s])(?:password|pwd)\s*=\s*([^;"'\s{}$()]{4,})\s*(?:;|$|["'])|(?:^|[;"'\s])(?:password|pwd)\s*=\s*([^;"'\s{}$()]{4,})\s*;[^\n]{0,200}?(?:server|data source|host|address|database|uid|user id)\s*=)`,
+			Keywords: []string{"password", "pwd"}, Tags: []string{"credentials"},
+			Allowlists: []Allowlist{placeholderValues}},
 
 		// --- File-name rules (no regex) ------------------------------------
 		{ID: "sensitive-file", Description: "File that usually holds credentials or keys", Severity: "medium",
@@ -278,7 +294,7 @@ func DefaultRules() []Rule {
 		// --- Generic (lowest priority, yields to specific rules) ----------
 		{ID: "generic-api-key", Description: "Generic API key, token or secret", Severity: "medium", Entropy: 3.5,
 			Regex: semi([]string{`access`, `auth`, `(?-i:[Aa]pi|API)`, `credential`, `creds`, `key`, `passw(?:or)?d`, `secret`, `token`},
-				`[\w.=-]{10,150}|[a-z0-9][a-z0-9+/]{11,}={0,3}`, true),
+				`[\w.=!@#%^&*+~?$-]{10,150}|[a-z0-9][a-z0-9+/]{11,}={0,3}`, true),
 			Keywords: []string{"access", "api", "auth", "key", "credential", "creds", "passwd", "password", "secret", "token"},
 			Tags:     []string{"generic"},
 			Allowlists: []Allowlist{
@@ -294,10 +310,19 @@ func DefaultRules() []Rule {
 					`^\.[A-Za-z][\w.-]*$`,               // dotfile names
 					`(?i)^[\w-]+\.(?:json|ya?ml|toml|txt|md|go|py|js|ts|sh|env|ini|conf|cfg|xml|html|lock|log)$`, // file names
 				}},
+				nameAllowlist, hashedValues,
+
 				{Description: "value read from env/secret store", RegexTarget: "line", Regexes: []string{
 					`(?i)(?:getenv|environ\[|process\.env|secretKeyRef|valueFrom|keyvault|\$\(\w+\)|\{\{\s*secrets\.)`,
 				}},
 			}},
+		{ID: "xml-config-secret", Description: "Secret in XML config (<add key=... value=...>, <password>...</password>)", Severity: "medium", Entropy: 3.0,
+			// .NET web.config/app.config appSettings, Maven settings.xml, Spring XML.
+			Regex:       `(?i)(?:<add\s+(?:key|name)\s*=\s*"[^"]*(?:passw(?:or)?d|pwd|[._-]pass|secret|token|api[_.-]?key|access[_.-]?key|master[_.-]?key|credential|client[_.-]?secret)[^"]*"\s+value\s*=\s*"([^"\s]{8,200})"|<[\w:.-]*(?:passw(?:or)?d|secret|token|apikey|api_key|credential)[\w:.-]*>([^<\s]{8,200})</)`,
+			SecretGroup: 0, Keywords: []string{"<add", "password>", "secret>", "token>", "apikey>", "api_key>", "credential>", "credentials>", "passwd>"},
+			Tags: []string{"generic", "credentials", "xml"},
+			Allowlists: []Allowlist{nameAllowlist, placeholderValues, hashedValues,
+				{Description: "placeholders", Regexes: []string{`^\$\(`, `^\$\{`, `^#\{`, `^@`, `^\[\w+\]$`}}}},
 		{ID: "password-assignment", Description: "Hard-coded password literal", Severity: "low",
 			Regex:    `(?i)[\w.-]{0,30}?(?:passw(?:or)?d|pwd|passphrase)(?:[ \t\w.-]{0,10})[\s'"]{0,3}(?:=|:|:=|=>)\s*["']([^"'\s$<{%]{6,64})["']`,
 			Keywords: []string{"passw", "pwd", "passphrase"},
@@ -329,10 +354,14 @@ func DefaultAllowlists() []Allowlist {
 			`(?i)\.(?:png|jpe?g|gif|bmp|ico|webp|tiff?|svg|woff2?|ttf|otf|eot|pdf|zip|gz|tgz|bz2|xz|7z|rar|jar|war|ear|class|exe|dll|so|dylib|a|o|bin|dat|mp[34]|mov|avi|wav|flac|ogg|pyc|whl|egg|wasm|DS_Store)$`,
 			`(?:^|/)(?:go\.sum|go\.work\.sum|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb|poetry\.lock|Pipfile\.lock|uv\.lock|Cargo\.lock|composer\.lock|Gemfile\.lock|gradle\.lockfile|packages\.lock\.json|MODULE\.bazel\.lock)$`,
 			`(?:^|/)(?:node_modules|\.git|\.venv|__pycache__|\.terraform/providers)/`,
+			`(?:^|/)[\w.+-]+\.dist-info/(?:RECORD|METADATA|WHEEL)$`,
+			`(?:^|/)vendor/modules\.txt$`,
+			`(?:^|/)(?:gradlew|mvnw)(?:\.bat|\.cmd)?$`,
 			`(?:^|/)(?:\.?secretscan\.toml|\.gitleaks\.toml|gitleaks\.toml|\.secretscanignore|\.gitleaksignore|\.secrets\.baseline)$`,
 		}},
 		{Description: "placeholders and templated values", Regexes: []string{
 			`^\$\{[^}]*\}$`, `^\$\([^)]*\)$`, `^\{\{.*\}\}$`, `^<[^>]+>$`, `^%[A-Za-z_]+%$`, `^\$[A-Z_][A-Z0-9_]*$`,
+			`^\{[A-Za-z_][\w.]*\}$`, `^%\(\w+\)s$`, `^@[A-Za-z_]\w*@$`, `^#\{[^}]+\}$`,
 			`^[*xX#•.]+$`,
 			`(?i)^(?:your|my|insert|replace|enter|put)[_-]`,
 			`(?i)(?:example|sample|dummy|placeholder|changeme|redacted|notreal|not_a_real|fake_?(?:key|token|secret))`,
@@ -344,3 +373,30 @@ func DefaultAllowlists() []Allowlist {
 func Default() *Config {
 	return &Config{Title: "secretscan default rules", Rules: DefaultRules(), Allowlists: DefaultAllowlists()}
 }
+
+// nameAllowlist drops values whose identifier says they aren't secrets
+// (ids, names, URLs, pagination/verification tokens, hashes, ...). It is
+// evaluated against the match text before the secret ("prefix").
+var nameAllowlist = Allowlist{Description: "names that hold identifiers, not secrets", RegexTarget: "prefix", Regexes: []string{
+	`(?i)(?:name|ids?|arn|ur[il]|path|type|mode|version|region|endpoint|header|label|format|prefix|suffix|count|length|size|marker|class|kind|enabled|required|field)["'\x60]?\s*(?:=|:|=>|,|\?=)?\s*["'\x60]?$`,
+	`(?i)(?:next|continuation|pagination|page|sync|resume|cursor|verification|idempotency|request|client)[_.-]?(?:token|marker|key)`,
+	`(?i)(?:^|[^a-z])(?:pub(?:lic)?|primary|foreign|sort|partition|cache|idempotency|dedup(?:e|lication)?|bucket|object|sequence|natural|schema)[_.-]?keys?(?:[^a-z]|$)`,
+	`(?i)(?:^|[^a-z])keys?[_.-]?(?:ids?|name|alias|path|file|size|length|type|usage|pair|ring|code|board|word|frame|spec|hash|version|format|prefix|count|fingerprint|vault[_.-]?(?:id|name|uri|url))(?:[^a-z]|$)`,
+	`(?i)(?:^|[^a-z])tokens?[_.-]?(?:url|uri|endpoint|type|ttl|expir\w*|count|limit|file|path|name|header|prefix|kind|usage)(?:[^a-z]|$)`,
+	`(?i)(?:^|[^a-z])(?:secret|password|passwd)[_.-]?(?:name|ref|keyref|path|file|length|policy|hint|field|label|prompt|reset\w*|min\w*|max\w*|regex|pattern|rules?|strength|expir\w*)(?:[^a-z]|$)`,
+	`(?i)(?:^|[^a-z])(?:auth(?:or(?:ity|ization)?)?|access)[_.-]?(?:url|uri|type|method|mode|header|provider|domain|scheme|level|log|control|pattern|rights?|policy|scope|group)(?:[^a-z]|$)`,
+	`(?i)(?:^|[^a-z])api[_.-]?(?:version|url|uri|base|host|path|name|group|id|endpoint|spec|docs?)(?:[^a-z]|$)`,
+	`(?i)(?:^|[^a-z])(?:sha(?:1|224|256|384|512)|md5|checksum|digest|integrity|etag|nonce|salt|iv)(?:[^a-z]|$)`,
+}}
+
+// placeholderValues are documentation/template values for password-like fields.
+var placeholderValues = Allowlist{Description: "placeholder and documentation passwords", Regexes: []string{
+	`(?i)^(?:pass(?:word)?|passwd|pwd|secret|pw|test|admin|user(?:name)?|guest|root|xxx+|\*+|token|apikey|my%20pass|tiger|scott|hunter2|changeme|example|sample|dummy|foobar|foo|bar|pass%\w+|whatever|mypassword|yourpassword)$`,
+	`^\{[A-Za-z_][\w.]*\}$`, `^%\(\w+\)s$`, `^\$\{?[A-Za-z_]\w*\}?$`, `^<[^>]+>$`, `^\(.*\)$`, `^\[[^\]]+\]$`,
+}}
+
+// hashedValues are password hashes (bcrypt, sha-crypt, argon2, pbkdf2), not plaintext secrets.
+var hashedValues = Allowlist{Description: "password hashes", Regexes: []string{
+	`^\$(?:2[abxy]?|5|6|y|7|argon2(?:id|i|d)?|pbkdf2[\w-]*|scrypt|sha1|md5)\$`,
+	`^(?:pbkdf2_sha256|bcrypt_sha256|argon2)\$`,
+}}
