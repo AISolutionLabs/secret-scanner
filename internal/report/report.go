@@ -9,6 +9,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,10 +24,11 @@ type Options struct {
 	Color       bool
 	Remediation string // text: short (default) | full | none
 	Policy      string // strict | balanced: text output groups non-blocking findings for review
+	Explain     bool   // print the evidence for every finding (git hooks: explain every block)
 }
 
 // Formats lists supported report formats.
-var Formats = []string{"text", "json", "sarif", "csv", "junit"}
+var Formats = []string{"text", "json", "sarif", "csv", "junit", "stats"}
 
 // Write renders findings in the given format.
 func Write(w io.Writer, format string, fs []detect.Finding, rules []*config.CompiledRule, version string, o Options) error {
@@ -41,8 +43,48 @@ func Write(w io.Writer, format string, fs []detect.Finding, rules []*config.Comp
 		return CSV(w, fs)
 	case "junit":
 		return JUnit(w, fs)
+	case "stats":
+		return Stats(w, fs, version, o.Policy)
 	}
 	return fmt.Errorf("unknown report format %q (want one of %s)", format, strings.Join(Formats, ", "))
+}
+
+// StatsReport is an anonymized summary for sharing results publicly (for
+// example in a benchmark issue): counts only. It contains no file paths,
+// secret values, fingerprints, line numbers or commit data.
+type StatsReport struct {
+	Schema       int            `json:"schema"`
+	Version      string         `json:"version"`
+	Policy       string         `json:"policy"`
+	Findings     int            `json:"findings"`
+	Blocking     int            `json:"blocking"`
+	ByRule       map[string]int `json:"byRule"`
+	ByConfidence map[string]int `json:"byConfidence"`
+	ByFileType   map[string]int `json:"byFileType"` // extension only, e.g. ".py"
+}
+
+// Stats writes a StatsReport.
+func Stats(w io.Writer, fs []detect.Finding, version, policy string) error {
+	if policy == "" {
+		policy = "strict"
+	}
+	r := StatsReport{Schema: 1, Version: version, Policy: policy, Findings: len(fs),
+		ByRule: map[string]int{}, ByConfidence: map[string]int{}, ByFileType: map[string]int{}}
+	for _, f := range fs {
+		if f.Blocking {
+			r.Blocking++
+		}
+		r.ByRule[f.RuleID]++
+		r.ByConfidence[f.Confidence]++
+		ext := strings.ToLower(filepath.Ext(f.File))
+		if ext == "" || len(ext) > 12 {
+			ext = "(none)"
+		}
+		r.ByFileType[ext]++
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(r)
 }
 
 // JSON writes a gitleaks-compatible JSON array.
@@ -125,7 +167,7 @@ func Text(w io.Writer, fs []detect.Finding, o Options) error {
 			}
 			fmt.Fprintf(w, "    verify:  %s\n", v)
 		}
-		if len(f.Evidence) > 0 && (o.Remediation == "full" || f.Confidence != detect.High) {
+		if len(f.Evidence) > 0 && (o.Explain || o.Remediation == "full" || f.Confidence != detect.High) {
 			fmt.Fprintf(w, "    why:     %s\n", c(cDim, strings.Join(f.Evidence, "; ")))
 		}
 		writeRemediation(w, f, o, c)

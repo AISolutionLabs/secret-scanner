@@ -19,6 +19,9 @@ jobs:
       - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - run: go vet ./...
       - run: go test -race -count=1 ./...
+      - name: Measure filter false negatives (20,000 random secrets per alphabet)
+        shell: bash
+        run: go test -count=1 -run 'PerAlphabet|SpareRandomSecrets' -v ./internal/detect | grep -E '^\s*\||lost|ok|FAIL'
       - name: Validate example config
         run: go run ./cmd/secretscan validate -c examples/secretscan.toml
       - name: Scan this repository's history with itself

@@ -34,6 +34,11 @@ func ConfidenceRank(c string) int {
 // provider-format (high-confidence) finding.
 var testPath = regexp.MustCompile(`(?i)(?:^|/)(?:tests?|spec|specs|__tests__|testdata|test_data|fixtures?|examples?|samples?|mocks?|docs?)/|(?:_test\.go|\.test\.[cm]?[jt]sx?|\.spec\.[cm]?[jt]sx?|_spec\.rb|(?:^|/)test_[^/]*\.py|_test\.py)$|(?:^|[/_.-])(?:tests?|specs?|fixtures?|examples?|samples?|mocks?|fake|dummy)[_.-][^/]*$`)
 
+// weakPassword matches dictionary-style passwords (pass123, admin2024,
+// password1) that are equally likely to be real weak credentials or doc
+// placeholders: reported, at reduced confidence.
+var weakPassword = regexp.MustCompile(`(?i)^(?:pass(?:word|wd)?|admin(?:istrator)?|root|test|user|guest|secret|changeme|qwerty|letmein|welcome|demo|default|login|master|super(?:user)?)[_.!@#-]?\w{0,4}[!@#]?$`)
+
 // IsTestPath reports whether path looks like test, fixture, example or doc content.
 func IsTestPath(path string) bool { return testPath.MatchString(path) }
 
@@ -74,6 +79,10 @@ func assess(r *config.CompiledRule, secret string, quoted bool, path string, ent
 	if quoted || envishPath.MatchString(path) {
 		score++
 		ev = append(ev, "literal value in code or config")
+	}
+	if r.HasTag("credentials") && weakPassword.MatchString(secret) {
+		score--
+		ev = append(ev, "common weak or placeholder-like password (could be an example)")
 	}
 	if !IsTestPath(path) {
 		score++

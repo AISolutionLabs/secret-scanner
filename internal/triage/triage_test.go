@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"math/rand"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -86,5 +87,81 @@ func TestParseFormats(t *testing.T) {
 	kind, in, err = Parse([]byte(sarif))
 	if err != nil || kind != "sarif" || len(in) != 1 || in[0].File != "c.go" || in[0].Secret != "abc" || in[0].Tool != "gitleaks" {
 		t.Errorf("sarif: %s %+v %v", kind, in, err)
+	}
+}
+
+func TestFileAccessIsContained(t *testing.T) {
+	outside := t.TempDir()
+	secret := tok("ghp_", 36, 9)
+	os.WriteFile(filepath.Join(outside, "victim.py"), []byte("GH = \""+secret+"\"\n"), 0o644)
+	tr := setup(t, map[string]string{"app.py": "x = 1\n"})
+	os.Symlink(filepath.Join(outside, "victim.py"), filepath.Join(tr.Root, "link.py"))
+	for name, file := range map[string]string{
+		"absolute path outside root": filepath.Join(outside, "victim.py"),
+		"dot-dot traversal":          "../" + filepath.Base(outside) + "/victim.py",
+		"symlink escaping root":      "link.py",
+	} {
+		f := tr.Evaluate(Input{Tool: "gitleaks", RuleID: "github-pat", File: file, StartLine: 1, Secret: secret})
+		if f.Triage != Uncorroborated || !strings.Contains(strings.Join(f.Evidence, " "), "outside --root") {
+			t.Errorf("%s: must not be read: %s %v", name, f.Triage, f.Evidence)
+		}
+	}
+}
+
+func TestHistoryIsNeverSubstituted(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	secret := tok("ghp_", 36, 10)
+	tr := setup(t, map[string]string{"app.py": "GH = \"" + secret + "\"\n"})
+	exec.Command("git", "-C", tr.Root, "init", "-q").Run()
+	// A commit that does not exist must not fall back to the working tree.
+	f := tr.Evaluate(Input{Tool: "gitleaks", RuleID: "github-pat", File: "app.py", StartLine: 1, Secret: secret,
+		Commit: "0123456789abcdef0123456789abcdef01234567"})
+	if f.Triage != Uncorroborated || !strings.Contains(strings.Join(f.Evidence, " "), "no working-tree substitution") {
+		t.Errorf("missing commit: %s %v", f.Triage, f.Evidence)
+	}
+	// Option-looking commit ids are rejected before reaching git.
+	f = tr.Evaluate(Input{Tool: "gitleaks", RuleID: "github-pat", File: "app.py", StartLine: 1, Secret: secret, Commit: "--output=/tmp/x"})
+	if f.Triage != Uncorroborated || !strings.Contains(strings.Join(f.Evidence, " "), "invalid commit") {
+		t.Errorf("bad commit id: %s %v", f.Triage, f.Evidence)
+	}
+}
+
+func TestStaleReportLines(t *testing.T) {
+	secret := tok("ghp_", 36, 11)
+	tr := setup(t, map[string]string{"app.py": "import os\n\n\n\nGH = \"" + secret + "\"\n"})
+	f := tr.Evaluate(Input{Tool: "gitleaks", RuleID: "github-pat", File: "app.py", StartLine: 1, Secret: secret})
+	if f.Triage != Uncorroborated || !strings.Contains(strings.Join(f.Evidence, " "), "source changed") {
+		t.Errorf("stale line: %s %v", f.Triage, f.Evidence)
+	}
+	if f := tr.Evaluate(Input{Tool: "gitleaks", RuleID: "github-pat", File: "app.py", StartLine: 5, Secret: secret}); f.Triage != Confirmed {
+		t.Errorf("current line should confirm: %s %v", f.Triage, f.Evidence)
+	}
+}
+
+func TestPartiallyRedactedReports(t *testing.T) {
+	secret := tok("ghp_", 36, 12)
+	tr := setup(t, map[string]string{
+		"app.py":      "GH = \"" + secret + "\"\n",
+		"Jenkinsfile": "    [envVar: 'TF_VAR_APPROLESECRETID', vaultKey: 'inf-vsqt-01-secret-id']]]]) {\n",
+	})
+	// gitleaks --redact=50 style ("prefix...") and secretscan style ("prefixREDACTED").
+	in := finish(Input{Tool: "gitleaks", RuleID: "github-pat", File: "app.py", StartLine: 1, Secret: secret[:20] + "..."})
+	if f := tr.Evaluate(in); f.Triage != Confirmed {
+		t.Errorf("prefix-redacted provider token should confirm: %s %v", f.Triage, f.Evidence)
+	}
+	in = finish(Input{Tool: "gitleaks", RuleID: "generic-api-key", File: "Jenkinsfile", StartLine: 1, Secret: "inf-vsqt-0REDACTED"})
+	if f := tr.Evaluate(in); !strings.HasPrefix(f.Triage, Filtered) {
+		t.Errorf("prefix-redacted noise should be filtered: %s %v", f.Triage, f.Evidence)
+	}
+	// Fully redacted: can only confirm, never filter.
+	in = finish(Input{Tool: "gitleaks", RuleID: "generic-api-key", File: "Jenkinsfile", StartLine: 1, Secret: "REDACTED"})
+	if f := tr.Evaluate(in); f.Triage != Uncorroborated {
+		t.Errorf("fully redacted noise must stay for review: %s", f.Triage)
+	}
+	// Too-short prefixes are treated as fully redacted.
+	if in := finish(Input{Secret: "gh..."}); in.Prefix != "" || !in.Redacted {
+		t.Errorf("short prefix: %+v", in)
 	}
 }

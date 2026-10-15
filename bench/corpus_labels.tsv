@@ -1,0 +1,30 @@
+# Manual adjudication of every secretscan finding on the package corpora
+# (bench/fetch-corpus.sh). Each finding was inspected in its source file.
+# First matching row wins. Columns (tab-separated):
+#   label      not-a-secret | example-credential | live-credential
+#   rule       rule ID regex
+#   file       file path regex
+#   value      secret value regex (values are public package contents)
+#   note       why
+#
+# example-credential: real credential *material* (keys, passwords, tokens) that
+# is a documented example or test fixture in a published package. Reporting it
+# is correct; it is not live. not-a-secret: the value is not credential material
+# at all (an identifier, digest, algorithm name, placeholder), i.e. a false positive.
+not-a-secret	generic-api-key	next-16\.4\.1/	^(MozCSSKeyframesRule|WebKitCSSKeyframesRule|TSNullKeyword|isTSAnyKeyword|isTSBigIntKeyword|pbkdf2Sync|r\.listKey===)$	JS identifiers in compiled bundles and source maps
+not-a-secret	generic-api-key	angular-core	^setIsI18nHydrationSupport	function name in a source map
+not-a-secret	generic-api-key	ansible	^jinja2_native$	config option name
+not-a-secret	generic-api-key	botocore	^base64url-decode$	encoding name in a service model
+not-a-secret	generic-api-key	openai	^x-amz-content-sha256$	HTTP header name
+not-a-secret	generic-api-key	botocore.*test_credentials\.py	^[0-9a-f]{40}$	SHA-1 cache keys of credentials, not credentials
+not-a-secret	gcp-service-account-key	google_cloud_storage	^f{40}$	placeholder private_key_id in a test account file
+example-credential	private-key	.	.	PEM private keys in docs and test fixtures (some truncated with ...)
+example-credential	jwt	botocore.*tests/	.	test tokens
+example-credential	aws-session-token	botocore	.	AWS documentation example session tokens (contain EXAMPLE)
+example-credential	azure-sas-token	azure_storage_blob.*samples/	.	SAS signature in SDK samples
+example-credential	password-assignment|generic-api-key	botocore	.	passwords and keys in API examples and unit tests
+example-credential	generic-api-key	google_cloud_storage.*tests/	.	customer-supplied encryption keys in tests
+example-credential	generic-api-key	azure_storage_blob.*tests/fake_credentials	.	fake credentials module
+example-credential	generic-api-key	kubernetes.*_test\.py	.	refresh token in a kubeconfig test
+example-credential	password-assignment	axios.*README|ansible.*lookup/url\.py|pydantic	.	passwords in documentation examples
+example-credential	url-credentials	sqlalchemy|mongoose|httpx|pydantic	.	user:password URLs in docstrings and URL-parsing tests

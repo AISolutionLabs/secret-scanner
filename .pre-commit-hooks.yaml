@@ -1,7 +1,7 @@
 - id: secretscan
   name: secretscan (staged changes)
   description: Block commits that contain secrets
-  entry: secretscan git --staged
+  entry: secretscan git --staged --default-policy balanced
   language: golang
   pass_filenames: false
   stages: [pre-commit]
@@ -9,7 +9,7 @@
 - id: secretscan-push
   name: secretscan (outgoing commits)
   description: Block pushes of commits that contain secrets
-  entry: sh -c 'secretscan git --log-opts "$PRE_COMMIT_FROM_REF..$PRE_COMMIT_TO_REF"'
+  entry: sh -c 'secretscan git --default-policy balanced --log-opts "$PRE_COMMIT_FROM_REF..$PRE_COMMIT_TO_REF"'
   language: golang
   pass_filenames: false
   stages: [pre-push]

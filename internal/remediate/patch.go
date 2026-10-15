@@ -26,6 +26,18 @@ type PatchResult struct {
 	Skipped []string          // human-readable reasons
 	EnvVars []string          // variables the patched code now expects
 	Files   map[string]string // new content per file (for in-place --fix)
+	// Unchecked lists files whose language has no syntax validator here.
+	Unchecked []string
+	Langs     []string // languages touched (for caveats)
+}
+
+func appendUnique(xs []string, x string) []string {
+	for _, y := range xs {
+		if y == x {
+			return xs
+		}
+	}
+	return append(xs, x)
 }
 
 // patchable languages: literal -> expression, plus an optional import.
@@ -72,6 +84,11 @@ func BuildPatch(root string, items []PatchItem) PatchResult {
 			continue
 		}
 		oldLines, trailingNL := splitLines(string(data))
+		patchedBefore, envBefore := len(res.Patched), len(res.EnvVars)
+		envSeenBefore := map[string]bool{}
+		for k := range envSeen {
+			envSeenBefore[k] = true
+		}
 		newLines := append([]string(nil), oldLines...)
 		changed := map[int]bool{}
 		for _, it := range byFile[file] {
@@ -97,7 +114,8 @@ func BuildPatch(root string, items []PatchItem) PatchResult {
 			continue
 		}
 		insertAt, importLine := importFor(lang, newLines)
-		res.Diff += unifiedDiff(file, oldLines, newLines, changed, insertAt, importLine, trailingNL)
+		// Never emit a change that breaks the file: validate the result
+		// (when the original itself parses).
 		final := append([]string(nil), newLines...)
 		if insertAt >= 0 {
 			final = append(final[:insertAt], append(strings.Split(importLine, "\n"), final[insertAt:]...)...)
@@ -106,6 +124,21 @@ func BuildPatch(root string, items []PatchItem) PatchResult {
 		if trailingNL {
 			content += "\n"
 		}
+		if okOrig, origErr := Validate(lang, string(data)); okOrig && origErr == nil {
+			if _, err := Validate(lang, content); err != nil {
+				for _, it := range byFile[file] {
+					res.Skipped = append(res.Skipped, fmt.Sprintf("%s:%d: automatic edit would not parse (%v); edit by hand using %s", file, it.Line, err, EnvExpr(lang, it.EnvVar)))
+				}
+				// Roll back this file's bookkeeping.
+				res.Patched, res.EnvVars = res.Patched[:patchedBefore], res.EnvVars[:envBefore]
+				envSeen = envSeenBefore
+				continue
+			}
+		} else if !okOrig {
+			res.Unchecked = append(res.Unchecked, file)
+		}
+		res.Langs = appendUnique(res.Langs, lang)
+		res.Diff += unifiedDiff(file, oldLines, newLines, changed, insertAt, importLine, trailingNL)
 		res.Files[file] = content
 	}
 	sort.Strings(res.EnvVars)
@@ -138,6 +171,9 @@ func replaceQuoted(line, secret, expr, lang string) (string, bool) {
 	for _, q := range quotes {
 		lit := string(q) + secret + string(q)
 		if i := strings.Index(line, lit); i >= 0 {
+			if insideString(line, i) {
+				return line, false // nested in another literal (struct tag, template, SQL...): not an expression slot
+			}
 			if lang == "python" && i > 0 && strings.ContainsRune("rRbBuUfF", rune(line[i-1])) && (i < 2 || !isIdent(line[i-2])) {
 				i-- // r"..." / b"..." prefixes
 				lit = line[i:i+1] + lit
@@ -293,4 +329,22 @@ func unifiedDiff(file string, oldL, newL []string, changed map[int]bool, insertA
 		delta += newN - oldN
 	}
 	return out.String()
+}
+
+// insideString reports whether byte offset i of line falls inside a string
+// literal that started earlier on the line (", ', or `), honoring escapes.
+func insideString(line string, i int) bool {
+	var open byte
+	for j := 0; j < i; j++ {
+		c := line[j]
+		switch {
+		case open == 0 && (c == '"' || c == '\'' || c == '`'):
+			open = c
+		case open != 0 && c == '\\' && open != '`':
+			j++ // skip escaped char
+		case open != 0 && c == open:
+			open = 0
+		}
+	}
+	return open != 0
 }

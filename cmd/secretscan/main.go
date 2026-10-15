@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -154,6 +155,7 @@ type common struct {
 	exitCode      int
 	minSeverity   string
 	policy        string
+	defaultPolicy string
 	minConfidence string
 	showSupp      bool
 	maxMB         float64
@@ -170,6 +172,7 @@ type common struct {
 	remediation   string
 	fixPatch      string
 	fixInPlace    bool
+	yes           bool
 	followLinks   bool
 	timeout       time.Duration
 
@@ -200,13 +203,14 @@ func bindCommon(fs *flag.FlagSet, c *common, mode string) {
 	fs.Var(&c.exclude, "exclude-path", "regex of paths to skip (repeatable)")
 	fs.Var(&c.ignoreFiles, "ignore-file", "ignore file of fingerprints / sha256:<hash> / rule:<id>[:file] (default: .secretscanignore, .gitleaksignore)")
 	str(&c.baseline, []string{"b", "baseline-path"}, "", "JSON report of accepted findings to ignore")
-	str(&c.format, []string{"f", "report-format"}, "", "text|json|sarif|csv|junit (default: text, or from --report-path extension)")
+	str(&c.format, []string{"f", "report-format"}, "", "text|json|sarif|csv|junit|stats (default: text, or from --report-path extension)")
 	str(&c.reportPath, []string{"r", "report-path"}, "", "write report to this file instead of stdout")
 	c.redact = 80
 	fs.Var(redactFlag{&c.redact}, "redact", "mask secrets in output: --redact (100%), --redact=N (percent hidden), --redact=0 to show (default 80)")
 	fs.IntVar(&c.exitCode, "exit-code", 1, "exit code when secrets are found")
 	fs.StringVar(&c.minSeverity, "min-severity", "low", "report and fail only at/above: info|low|medium|high|critical")
 	fs.StringVar(&c.policy, "policy", "", "strict (every finding blocks; default) | balanced (only high-confidence findings block, the rest are listed for review)")
+	fs.StringVar(&c.defaultPolicy, "default-policy", "", "policy to use when neither --policy nor the config sets one (git hooks use balanced)")
 	fs.StringVar(&c.minConfidence, "min-confidence", "low", "hide findings below this confidence: low|medium|high (hidden findings are still counted)")
 	fs.BoolVar(&c.showSupp, "show-suppressed", false, "list every candidate removed by a filter or allowlist, with the reason")
 	fs.Float64Var(&c.maxMB, "max-target-megabytes", 10, "skip files (or diff additions per file) larger than this; 0 = no limit")
@@ -223,7 +227,8 @@ func bindCommon(fs *flag.FlagSet, c *common, mode string) {
 	fs.StringVar(&c.secretStore, "secret-store", "", "store the fix guidance targets: env|vault|aws|azure|gcp (default from config [remediation] store, else env)")
 	fs.StringVar(&c.remediation, "remediation", "short", "fix guidance in text output: short|full|none")
 	fs.StringVar(&c.fixPatch, "fix-patch", "", "write a git-apply-able patch replacing hard-coded literals with env lookups (contains the old secrets: keep it outside the repo)")
-	fs.BoolVar(&c.fixInPlace, "fix", false, "replace hard-coded literals with env lookups in place (dir or git --staged)")
+	fs.BoolVar(&c.fixInPlace, "fix", false, "rewrite hard-coded literals into env lookups in place after showing the diff and asking (prefer --fix-patch to review first)")
+	fs.BoolVar(&c.yes, "yes", false, "with --fix: apply without the interactive confirmation")
 	fs.DurationVar(&c.timeout, "timeout", 0, "abort the scan after this long, e.g. 30s (0 = none)")
 	switch mode {
 	case "dir":
@@ -438,13 +443,7 @@ func runScan(ctx context.Context, mode string, args []string) int {
 	}
 	// Confidence filter (hidden findings are counted, never silently dropped)
 	// and policy: which findings block the commit / build.
-	policy := c.policy
-	if policy == "" {
-		policy = rs.Policy
-	}
-	if policy == "" {
-		policy = "strict"
-	}
+	policy := resolvePolicy(c, rs)
 	hidden := 0
 	minConf := detect.ConfidenceRank(c.minConfidence)
 	shown := kept[:0]
@@ -483,7 +482,7 @@ func runScan(ctx context.Context, mode string, args []string) int {
 			fmt.Fprintln(os.Stderr, "secretscan: --fix/--fix-patch need `dir <one directory>` or `git --staged`")
 			return exitError
 		}
-		sum, err := applyFixes(c.fixPatch, c.fixInPlace, root, kept)
+		sum, err := applyFixes(c.fixPatch, c.fixInPlace, c.yes, root, kept)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "secretscan: %v\n", err)
 			return exitError
@@ -537,7 +536,7 @@ func runScan(ctx context.Context, mode string, args []string) int {
 			fmt.Fprintf(os.Stderr, "secretscan: %v\n", err)
 			return exitError
 		}
-		werr := report.Write(out, format, kept, rs.Rules, version, report.Options{Remediation: c.remediation, Policy: policy})
+		werr := report.Write(out, format, kept, rs.Rules, version, report.Options{Remediation: c.remediation, Policy: policy, Explain: c.staged || c.prePush})
 		if cerr := out.Close(); werr == nil {
 			werr = cerr
 		}
@@ -546,10 +545,10 @@ func runScan(ctx context.Context, mode string, args []string) int {
 			return exitError
 		}
 		if !c.quiet && format != "text" {
-			_ = report.Text(os.Stdout, kept, report.Options{Color: color, Remediation: c.remediation, Policy: policy})
+			_ = report.Text(os.Stdout, kept, report.Options{Color: color, Remediation: c.remediation, Policy: policy, Explain: c.staged || c.prePush})
 		}
 	} else if !c.quiet || format != "text" {
-		if err := report.Write(os.Stdout, format, kept, rs.Rules, version, report.Options{Color: color, Remediation: c.remediation, Policy: policy}); err != nil {
+		if err := report.Write(os.Stdout, format, kept, rs.Rules, version, report.Options{Color: color, Remediation: c.remediation, Policy: policy, Explain: c.staged || c.prePush}); err != nil {
 			fmt.Fprintf(os.Stderr, "secretscan: %v\n", err)
 			return exitError
 		}
@@ -594,6 +593,17 @@ func runScan(ctx context.Context, mode string, args []string) int {
 		return c.exitCode
 	}
 	return exitOK
+}
+
+// resolvePolicy: --policy, then the repo config, then --default-policy
+// (set by git hooks), then strict.
+func resolvePolicy(c common, rs *config.Ruleset) string {
+	for _, p := range []string{c.policy, rs.Policy, c.defaultPolicy} {
+		if p != "" {
+			return p
+		}
+	}
+	return "strict"
 }
 
 // writeSuppressed lists the ledger: every candidate a filter or allowlist
@@ -652,11 +662,13 @@ func buildDetector(c common, searchDirs []string) (*detect.Detector, *config.Rul
 		return nil, nil, exitError
 	}
 	dopts := detect.Options{MaxDecodeDepth: c.decodeDepth, NoNoiseFilters: c.noFilters, RecordSuppressed: c.showSupp}
-	switch c.policy {
-	case "", "strict", "balanced":
-	default:
-		fmt.Fprintf(os.Stderr, "secretscan: unknown --policy %q (want strict or balanced)\n", c.policy)
-		return nil, nil, exitError
+	for _, p := range []string{c.policy, c.defaultPolicy} {
+		switch p {
+		case "", "strict", "balanced":
+		default:
+			fmt.Fprintf(os.Stderr, "secretscan: unknown policy %q (want strict or balanced)\n", p)
+			return nil, nil, exitError
+		}
 	}
 	switch c.minConfidence {
 	case "", "low", "medium", "high":
@@ -676,6 +688,17 @@ func gitTopLevel(dir string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// interactive reports whether stdin is a real terminal (/dev/null is also a
+// character device, so it is excluded explicitly).
+func interactive() bool {
+	if !isTerminal(os.Stdin) {
+		return false
+	}
+	in, err1 := os.Stdin.Stat()
+	null, err2 := os.Stat(os.DevNull)
+	return err1 == nil && (err2 != nil || !os.SameFile(in, null))
 }
 
 func isTerminal(f *os.File) bool {
@@ -805,7 +828,9 @@ func ruleFires(det *detect.Detector, id, text, path string) bool {
 const hookMarker = "# managed-by: secretscan"
 
 func hookScript(kind, bin, policy string) string {
-	pflag := ""
+	// An explicit --policy at install time wins over the repo config;
+	// otherwise the repo config decides, falling back to balanced.
+	pflag := " --default-policy balanced"
 	if policy != "" {
 		pflag = " --policy " + policy
 	}
@@ -846,7 +871,7 @@ func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''
 func runInstallHook(args []string) int {
 	fs := flag.NewFlagSet("secretscan install-hook", flag.ContinueOnError)
 	kind := fs.String("type", "pre-commit", "pre-commit | pre-push | both")
-	hookPolicy := fs.String("policy", "", "strict | balanced (default: from config, else strict)")
+	hookPolicy := fs.String("policy", "", "strict | balanced (default: the repo config's policy, else balanced)")
 	repo := fs.String("repo", ".", "repository")
 	pos, err := parseInterleaved(fs, args)
 	if err != nil {
@@ -896,12 +921,29 @@ func runInstallHook(args []string) int {
 		}
 		fmt.Printf("installed %s hook at %s\n", k, path)
 	}
+	switch *hookPolicy {
+	case "strict":
+		fmt.Print(`
+policy: strict. Every finding blocks the commit/push, including medium- and
+low-confidence generic matches. Expect more interruptions; use for
+security-sensitive repositories.
+`)
+	default:
+		fmt.Print(`
+policy: balanced (unless .secretscan.toml sets one). High-confidence findings
+(provider token formats, verified secrets, strong generic matches) block.
+Medium/low-confidence findings are printed under "Needs review" and do NOT
+block. On the project's benchmark that lets 1 of 529 labeled secrets through
+the hook (still printed). Run CI with the default strict policy, or reinstall
+with --policy strict to block everything locally.
+`)
+	}
 	return exitOK
 }
 
 // applyFixes builds the literal replacements and writes them as a patch
 // file, in place, or both. It returns a summary for stderr.
-func applyFixes(patchPath string, inPlace bool, root string, fs []detect.Finding) (string, error) {
+func applyFixes(patchPath string, inPlace, yes bool, root string, fs []detect.Finding) (string, error) {
 	seen := map[string]bool{}
 	var items []remediate.PatchItem
 	for _, f := range fs {
@@ -929,6 +971,17 @@ func applyFixes(patchPath string, inPlace bool, root string, fs []detect.Finding
 			}
 		}
 	}
+	if inPlace && len(res.Files) > 0 && !yes {
+		if !interactive() {
+			return "", fmt.Errorf("refusing to rewrite %d file(s) without review: use --fix-patch FILE to review the change, or --fix --yes", len(res.Files))
+		}
+		fmt.Fprintf(os.Stderr, "%s\nApply these changes to %d file(s)? [y/N] ", res.Diff, len(res.Files))
+		ans, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		if a := strings.ToLower(strings.TrimSpace(ans)); a != "y" && a != "yes" {
+			b.WriteString("secretscan: --fix cancelled; no files changed\n")
+			inPlace = false
+		}
+	}
 	if inPlace {
 		for file, content := range res.Files {
 			p := filepath.Join(root, file)
@@ -948,7 +1001,15 @@ func applyFixes(patchPath string, inPlace bool, root string, fs []detect.Finding
 	for _, s := range res.Skipped {
 		fmt.Fprintf(&b, "  manual: %s\n", s)
 	}
-	b.WriteString("  this only changes the code; rotate the credentials too (they remain in git history)\n")
+	for _, l := range res.Langs {
+		if cv := remediate.Caveats[l]; cv != "" {
+			fmt.Fprintf(&b, "  note (%s): %s\n", l, cv)
+		}
+	}
+	if len(res.Unchecked) > 0 {
+		fmt.Fprintf(&b, "  review by hand (no syntax check available): %s\n", strings.Join(res.Unchecked, ", "))
+	}
+	b.WriteString("  this only changes the code: rotate the credentials too (they remain in git history and anywhere they were copied)\n")
 	return b.String(), nil
 }
 
@@ -1038,7 +1099,8 @@ func runTriage(args []string) int {
 	fs := flag.NewFlagSet("secretscan triage", flag.ContinueOnError)
 	var c common
 	bindCommon(fs, &c, "triage")
-	root := fs.String("root", ".", "directory (or git repository) the report's paths are relative to")
+	root := fs.String("root", ".", "directory (or git repository) the report's paths are relative to; files outside it are never read")
+	deleteInput := fs.Bool("delete-input", false, "delete the report file after reading it (even if triage fails)")
 	pos, err := parseInterleaved(fs, args)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -1054,6 +1116,16 @@ func runTriage(args []string) int {
 	if pos[0] == "-" {
 		data, err = io.ReadAll(os.Stdin)
 	} else {
+		if *deleteInput {
+			defer func() {
+				if rerr := os.Remove(pos[0]); rerr == nil {
+					fmt.Fprintf(os.Stderr, "secretscan: deleted %s\n", pos[0])
+				}
+			}()
+		}
+		if fi, serr := os.Stat(pos[0]); serr == nil && fi.Mode().Perm()&0o077 != 0 {
+			fmt.Fprintf(os.Stderr, "secretscan: warning: %s is readable by other users (mode %v)\n", pos[0], fi.Mode().Perm())
+		}
 		data, err = os.ReadFile(pos[0])
 	}
 	if err != nil {
@@ -1065,18 +1137,25 @@ func runTriage(args []string) int {
 		fmt.Fprintf(os.Stderr, "secretscan: %v\n", err)
 		return exitError
 	}
+	if pos[0] != "-" && !*deleteInput {
+		unredacted := 0
+		for _, in := range inputs {
+			if !in.Redacted && in.Secret != "" {
+				unredacted++
+			}
+		}
+		if unredacted > 0 {
+			fmt.Fprintf(os.Stderr, "secretscan: warning: %s contains %d unredacted secret(s) on disk. Prefer piping "+
+				"(gitleaks ... -f json -r - | secretscan triage -), a partially redacted report (gitleaks --redact=50), or --delete-input\n",
+				pos[0], unredacted)
+		}
+	}
 	c.showSupp = true // the triager needs the suppression ledger
 	det, rs, code := buildDetector(c, []string{*root})
 	if det == nil {
 		return code
 	}
-	policy := c.policy
-	if policy == "" {
-		policy = rs.Policy
-	}
-	if policy == "" {
-		policy = "strict"
-	}
+	policy := resolvePolicy(c, rs)
 	tr := triage.New(det, *root)
 	var kept, filtered []detect.Finding
 	counts := map[string]int{}

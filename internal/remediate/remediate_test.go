@@ -176,3 +176,59 @@ func TestBuildPatch(t *testing.T) {
 		}
 	}
 }
+
+func TestPatchSkipsEditsThatWouldNotParse(t *testing.T) {
+	dir := t.TempDir()
+	// The literal is inside a Go raw-string/struct tag context where an
+	// expression is not allowed: replacing it would not compile.
+	write(t, dir, "tag.go", "package x\n\ntype T struct {\n\tF string `json:\"f\" default:\"SECRET1\"`\n}\n\nvar k = \"SECRET2\"\n")
+	res := BuildPatch(dir, []PatchItem{
+		{File: "tag.go", Line: 4, Secret: "SECRET1", EnvVar: "A"},
+		{File: "tag.go", Line: 7, Secret: "SECRET2", EnvVar: "B"},
+	})
+	// The tag literal is nested inside a raw string: never rewritten.
+	if len(res.Patched) != 1 || res.Patched[0].Line != 7 || strings.Contains(res.Files["tag.go"], `default:os.Getenv`) {
+		t.Fatalf("nested literal must be left alone: %+v", res)
+	}
+	if len(res.Skipped) != 1 || !strings.Contains(res.Skipped[0], "not a standalone quoted literal") {
+		t.Errorf("skipped = %v", res.Skipped)
+	}
+	// Valid edits in a validated language go through.
+	write(t, dir, "ok.py", "def f():\n    return {'k': \"SECRET8\"}\n")
+	res = BuildPatch(dir, []PatchItem{{File: "ok.py", Line: 2, Secret: "SECRET8", EnvVar: "K8"}})
+	if len(res.Patched) != 1 || !strings.Contains(res.Files["ok.py"], `os.environ["K8"]`) {
+		t.Errorf("valid python edit: %+v", res)
+	}
+	// Unvalidated languages are flagged for manual review.
+	write(t, dir, "Config.java", "class C { String k = \"SECRET3\"; }\n")
+	res = BuildPatch(dir, []PatchItem{{File: "Config.java", Line: 1, Secret: "SECRET3", EnvVar: "K"}})
+	if len(res.Patched) != 1 || len(res.Unchecked) != 1 {
+		t.Errorf("java should be patched but marked unchecked: %+v", res)
+	}
+}
+
+func TestInsideString(t *testing.T) {
+	cases := map[string]bool{
+		"x := \"SECRET\"":                    false,
+		"F string `json:\"f\" d:\"SECRET\"`": true,
+		`q = "SELECT 'SECRET' FROM t"`:       true,
+		`a = "x\"y"; b = "SECRET"`:           false,
+	}
+	for line, want := range cases {
+		i := strings.LastIndex(line, "SECRET") - 1
+		if got := insideString(line, i); got != want {
+			t.Errorf("insideString(%q) = %v, want %v", line, got, want)
+		}
+	}
+}
+
+func TestValidateRejectsBrokenEdits(t *testing.T) {
+	if ok, err := Validate("go", "package x\nvar k = os.Getenv(\"K\""); !ok || err == nil {
+		t.Error("broken Go should fail validation")
+	}
+	if _, err := exec.LookPath("python3"); err == nil {
+		if ok, err := Validate("python", "x = os.environ[\"K\"\n"); !ok || err == nil {
+			t.Error("broken Python should fail validation")
+		}
+	}
+}

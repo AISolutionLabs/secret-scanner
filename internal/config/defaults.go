@@ -51,6 +51,11 @@ func DefaultRules() []Rule {
 		withEntropy(r("aws-access-key-id", "AWS access key ID", "critical",
 			tok(`(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16}`),
 			[]string{"akia", "asia", "abia", "acca", "a3t"}, "aws", "cloud"), 3.0),
+		// SigV4 credential scope (Authorization headers, logs, presigned URLs):
+		// the key ID is followed by "/<date>/", which the token boundary rejects.
+		withEntropy(r("aws-access-key-id-sigv4", "AWS access key ID in a SigV4 credential scope", "critical",
+			`(?i:credential)=((?:AKIA|ASIA)[A-Z2-7]{16})(?:/|%2F)\d{8}(?:/|%2F)`,
+			[]string{"credential="}, "aws", "cloud"), 3.0),
 		withEntropy(r("aws-secret-access-key", "AWS secret access key", "critical",
 			semi([]string{`aws_?(?:secret_?(?:access_?)?key|sk)`, `secretaccesskey`}, `[A-Za-z0-9/+]{40}`, false),
 			[]string{"aws", "secretaccesskey"}, "aws", "cloud"), 4.0),
@@ -290,7 +295,7 @@ func DefaultRules() []Rule {
 
 		// --- File-name rules (no regex) ------------------------------------
 		{ID: "sensitive-file", Description: "File that usually holds credentials or keys", Severity: "medium",
-			Path: `(?i)(?:^|/)(?:id_(?:rsa|dsa|ecdsa|ed25519)|\.htpasswd|\.pgpass|\.git-credentials|\.netrc|_netrc|credentials\.(?:json|xml)|.*\.(?:p12|pfx|jks|keystore|kdbx|ovpn|tfstate|tfstate\.backup|ppk|asc\.key))$`,
+			Path: `(?i)(?:^|/)(?:id_(?:rsa|dsa|ecdsa|ed25519)|\.htpasswd|\.pgpass|\.git-credentials|\.netrc|_netrc|credentials\.(?:json|xml)|shadow|proftpdpasswd|.*\.(?:p12|pfx|jks|keystore|kdbx|ovpn|tfstate|tfstate\.backup|ppk|asc\.key))$|(?:^|/)config/(?:master|credentials/[\w-]+)\.key$|(?:^|/)\.mozilla/firefox/(?:[^/]+/)?(?:logins\.json|key[34]\.db)$`,
 			Tags: []string{"file"}},
 
 		// --- Generic (lowest priority, yields to specific rules) ----------
@@ -299,8 +304,7 @@ func DefaultRules() []Rule {
 				`[\w.=!@#%^&*+~?$-]{10,150}|[a-z0-9][a-z0-9+/]{11,}={0,3}`, true),
 			Keywords: []string{"access", "api", "auth", "key", "credential", "creds", "passwd", "password", "secret", "token"},
 			Tags:     []string{"generic"},
-			Allowlists: []Allowlist{
-				{Description: "common non-secret words", Stopwords: genericStopwords},
+			Allowlists: []Allowlist{{Description: "signature algorithm and auth scheme names", Regexes: []string{`(?i)^(?:AWS4-HMAC-SHA256|GOOG4-RSA-SHA256|HMAC-SHA(?:1|224|256|384|512)|RSA-SHA(?:1|256|512)|ECDSA-SHA256|Bearer|Basic|Digest|Negotiate)$`}},
 				{Description: "non-secret shapes", Regexes: []string{
 					`^[a-zA-Z_]+(?:\.[a-zA-Z_]+)+$`,   // dotted identifiers
 					`^[a-z]+(?:[_-][a-z]+)+$`,         // snake/kebab words
@@ -327,12 +331,41 @@ func DefaultRules() []Rule {
 			Tags: []string{"generic", "credentials", "xml"},
 			Allowlists: []Allowlist{nameAllowlist, placeholderValues, hashedValues,
 				{Description: "placeholders", Regexes: []string{`^\$\(`, `^\$\{`, `^#\{`, `^@`, `^\[\w+\]$`}}}},
+		{ID: "password-in-config", Description: "Unquoted password in an env, INI, properties or YAML config", Severity: "low",
+			// KEY=value / key: value lines where values are commonly unquoted.
+			Regex:    `(?im)^[ \t]*(?:export[ \t]+)?[\w.-]{0,40}?(?:passw(?:or)?d|pwd|passphrase|_pass|\bpass)(?:[_.-]?(?:\d{1,2}|prod|production|dev|stage|staging|test|local))?[ \t]*[=:][ \t]*([^\s'"#;$<{%][^\s'"#;]{3,63})[ \t]*(?:#.*)?$`,
+			Keywords: []string{"passw", "pwd", "passphrase", "pass"},
+			Path:     `(?i)(?:(?:^|/)\.env(?:\.[\w-]+)?|\.(?:env|ini|cfg|conf|properties|ya?ml|toml)|(?:^|/)(?:\.?[\w-]*rc|config))$`,
+			Tags:     []string{"generic", "credentials"},
+			Allowlists: []Allowlist{placeholderValues, hashedValues, {Description: "placeholder values", Regexes: []string{
+				`(?i)^(?:password|passw0rd|pass|changeme|changeit|secret|example|sample|dummy|test(?:ing)?|default|null|none|nil|undefined|required|optional|true|false|yes|no|on|off|redacted|x{4,}|\*{4,}|\.{4,})$`,
+				`^\d+$`, `^[a-zA-Z][a-zA-Z0-9+.-]*://`, `^[./~]`,
+			}}}},
+		{ID: "php-define-secret", Description: "Secret in a PHP define() (WordPress keys and salts, DB passwords)", Severity: "high",
+			Regex:       `(?i)define\(\s*['"]([A-Z0-9_]*(?:PASSWORD|PASS|SECRET|_KEY|SALT|TOKEN)[A-Z0-9_]*)['"]\s*,\s*'([^']{4,200})'\s*\)`,
+			SecretGroup: 2, Keywords: []string{"define"}, Tags: []string{"credentials"},
+			Allowlists: []Allowlist{placeholderValues, {Description: "WordPress placeholder", Regexes: []string{`(?i)^put your unique phrase here$`, `(?i)^(?:password_here|username_here|database_name_here)$`}}}},
+		{ID: "django-secret-key", Description: "Django SECRET_KEY", Severity: "high",
+			Regex:    `(?:^|[^\w])SECRET_KEY\s*=\s*['"]([^'"\n]{30,100})['"]`,
+			Keywords: []string{"secret_key"}, Tags: []string{"credentials"},
+			Allowlists: []Allowlist{placeholderValues, {Description: "insecure dev keys", Regexes: []string{`^django-insecure-`, `(?i)change|dummy|example|placeholder|not-?secret`}}}},
+		r("laravel-app-key", "Laravel APP_KEY", "high", `(?:^|\s)APP_KEY\s*=\s*["']?base64:([A-Za-z0-9+/]{40,}={0,2})`, []string{"app_key"}),
+		{ID: "xml-password-attribute", Description: "Password in an XML attribute or element (IDE, FTP and DB client configs)", Severity: "medium",
+			Regex:    `(?i)(?:\b(?:password|passwd|pwd|pass)\s*=\s*"([^"\s]{4,200})"|<(?:pass|password|passwd)(?:\s[^>]*)?>([^<\s]{4,200})</(?:pass|password|passwd)>)`,
+			Keywords: []string{"pass", "pwd"}, Path: `(?i)\.(?:xml|config|conf|xaml|jnlp|plist)$`,
+			Tags:       []string{"credentials"},
+			Allowlists: []Allowlist{placeholderValues, hashedValues, {Description: "variables", Regexes: []string{`^\$\{`, `^\$\(`, `^#\{`, `^@`, `^\[\w+\]$`, `^%[\w]+%$`}}}},
+		{ID: "netrc-password", Description: "Password in a .netrc file", Severity: "high",
+			Regex: `(?:^|\s)password\s+(\S{3,})`, Keywords: []string{"password"},
+			Path: `(?:^|/)[._]netrc$`, Tags: []string{"credentials"}, Allowlists: []Allowlist{placeholderValues}},
 		{ID: "password-assignment", Description: "Hard-coded password literal", Severity: "low",
-			Regex:    `(?i)[\w.-]{0,30}?(?:passw(?:or)?d|pwd|passphrase)(?:[ \t\w.-]{0,10})[\s'"]{0,3}(?:=|:|:=|=>)\s*["']([^"'\s$<{%]{6,64})["']`,
-			Keywords: []string{"passw", "pwd", "passphrase"},
+			Regex:    `(?i)[\w.-]{0,30}?(?:passw(?:or)?d|pwd|passphrase|\bpass\b)(?:[ \t\w.-]{0,10})[\s'"]{0,3}(?:=|:|:=|=>)\s*["']([^"'\s$<{%]{6,64})["']`,
+			Keywords: []string{"passw", "pwd", "passphrase", "pass"},
 			Tags:     []string{"generic", "credentials"},
 			Allowlists: []Allowlist{{Description: "placeholder values", Regexes: []string{
-				`(?i)^(?:password|passw0rd|pass|changeme|changeit|secret|example|sample|dummy|test(?:ing)?|default|null|none|undefined|required|optional|redacted|x{4,}|\*{4,}|\.{4,})\d*$`,
+				// Exact placeholder words only. "pass123" / "password123" are reported
+				// (low confidence) rather than dropped: weak real passwords look the same.
+				`(?i)^(?:password|passw0rd|pass|changeme|changeit|secret|example|sample|dummy|test(?:ing)?|default|null|none|undefined|required|optional|redacted|x{4,}|\*{4,}|\.{4,})$`,
 				`(?i)^(?:enter|your|my|new|old|confirm)[_ -]?pass`,
 				`^[a-zA-Z][a-zA-Z0-9+.-]*://`, // URLs (url-credentials covers passwords in URLs)
 				`^[./~]`,                      // file paths
@@ -340,6 +373,11 @@ func DefaultRules() []Rule {
 	}
 	return rules
 }
+
+// GenericStopwords are substrings of common non-secret values. The detector
+// applies them only to word-like values (see detect.genericNoise), so a
+// random token that happens to contain "secret" or "token" is kept.
+var GenericStopwords = genericStopwords
 
 var genericStopwords = []string{
 	"abcdef", "123456", "000000", "password", "passw0rd", "secret", "token", "apikey", "api_key", "bearer",
@@ -377,7 +415,7 @@ func DefaultAllowlists() []Allowlist {
 			`^\$\{[^}]*\}$`, `^\$\([^)]*\)$`, `^\{\{.*\}\}$`, `^<[^>]+>$`, `^%[A-Za-z_]+%$`, `^\$[A-Z_][A-Z0-9_]*$`,
 			`^\{[A-Za-z_][\w.]*\}$`, `^%\(\w+\)s$`, `^@[A-Za-z_]\w*@$`, `^#\{[^}]+\}$`,
 			`^[*xX#•.]+$`,
-			`(?i)^(?:your|my|insert|replace|enter|put)[_-]`,
+			`(?i)^(?:your|my|insert|replace|enter|put)[_-]?(?:own[_-]?|real[_-]?|actual[_-]?)?(?:api[_-]?|access[_-]?|secret[_-]?)?(?:key|token|secret|password|pass|value|here)`,
 			`(?i)(?:example|sample|dummy|placeholder|changeme|redacted|notreal|not_a_real|fake_?(?:key|token|secret))`,
 		}},
 	}
@@ -400,6 +438,7 @@ var nameAllowlist = Allowlist{Description: "names that hold identifiers, not sec
 	`(?i)(?:^|[^a-z])(?:secret|password|passwd)[_.-]?(?:name|ref|keyref|path|file|length|policy|hint|field|label|prompt|reset\w*|min\w*|max\w*|regex|pattern|rules?|strength|expir\w*)(?:[^a-z]|$)`,
 	`(?i)(?:^|[^a-z])(?:auth(?:or(?:ity|ization)?)?|access)[_.-]?(?:url|uri|type|method|mode|header|provider|domain|scheme|level|log|control|pattern|rights?|policy|scope|group)(?:[^a-z]|$)`,
 	`(?i)(?:^|[^a-z])api[_.-]?(?:version|url|uri|base|host|path|name|group|id|endpoint|spec|docs?)(?:[^a-z]|$)`,
+	`(?i)(?:(?:vault|kv|ssm|parameter|keyvault)[_.-]?(?:key|path|name|ref|id)|secret[_.-]?(?:path|name|ref|id|arn))["'\x60]?\s*(?:=|:|=>|,)?\s*["'\x60]?$`, // references to stored secrets
 	`(?i)(?:^|[^a-z])(?:sha(?:1|224|256|384|512)|md5|checksum|digest|integrity|etag|nonce|salt|iv)(?:[^a-z]|$)`,
 }}
 

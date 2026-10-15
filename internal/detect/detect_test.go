@@ -54,6 +54,7 @@ func samples() map[string]sample {
 	}
 	return map[string]sample{
 		"aws-access-key-id":                {text: "aws_key = AKIA" + g(b32u, 16)},
+		"aws-access-key-id-sigv4":          s("Authorization: AWS4-HMAC-SHA256 Credential=AKIA" + g(b32u, 16) + "/20260101/us-east-1/s3/aws4_request"),
 		"aws-secret-access-key":            s("AWS_SECRET_ACCESS_KEY=" + g(alnum+"/+", 40)),
 		"aws-session-token":                s("aws_session_token = " + g(alnum+"/+", 120)),
 		"aws-bedrock-api-key":              s("key: ABSKQmVkcm9ja0FQSUtleS" + g(alnum, 60)),
@@ -175,6 +176,12 @@ func samples() map[string]sample {
 		"generic-api-key":                  s(`api_secret = "` + g(alnum, 32) + `"`),
 		"xml-config-secret":                s(`<add key="StorageToken" value="` + g(alnum, 24) + `" />`),
 		"password-assignment":              s(`db_password = "` + "Tr0ub4dor&3" + `"`),
+		"password-in-config":               {text: "DB_PASSWORD=" + g(alnum, 14), path: "deploy/.env.production"},
+		"php-define-secret":                {text: "define('AUTH_KEY', '" + g(alnum+"!@#%^&*()-_[]{}<>~+=,.;:/?|", 64) + "');", path: "wp-config.php"},
+		"django-secret-key":                {text: "SECRET_KEY = '" + g(alnum+"!@#%^&*(-_=+)", 50) + "'", path: "mysite/settings.py"},
+		"laravel-app-key":                  {text: "APP_KEY=base64:" + g(alnum+"+/", 43) + "=", path: ".env"},
+		"xml-password-attribute":           {text: `<Server Host="ftp.example.org" User="deploy" Password="` + g(alnum, 16) + `"/>`, path: "conf/servers.xml"},
+		"netrc-password":                   {text: "machine api.example.org login deploy password " + g(alnum, 20), path: "home/.netrc"},
 	}
 }
 

@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/AISolutionLabs/secret-scanner/internal/detect"
@@ -39,6 +40,32 @@ type Input struct {
 	StartLine, EndLine                              int
 	Verified                                        bool
 	Redacted                                        bool
+	// Prefix is the visible part of a partially redacted secret
+	// (gitleaks --redact=N gives "abc...", secretscan gives "abcREDACTED").
+	Prefix string
+}
+
+// minPrefix is the shortest redaction prefix used for matching.
+const minPrefix = 4
+
+func redaction(s string) (redacted bool, prefix string) {
+	switch {
+	case s == "" || strings.Trim(s, "*") == "":
+		return true, ""
+	case strings.HasSuffix(s, "..."):
+		return true, strings.TrimSuffix(s, "...")
+	case strings.Contains(s, "REDACTED"):
+		return true, s[:strings.Index(s, "REDACTED")]
+	}
+	return false, ""
+}
+
+func finish(in Input) Input {
+	in.Redacted, in.Prefix = redaction(in.Secret)
+	if len(in.Prefix) < minPrefix {
+		in.Prefix = ""
+	}
+	return in
 }
 
 // Parse auto-detects gitleaks JSON, trufflehog JSON lines or SARIF.
@@ -57,8 +84,8 @@ func Parse(data []byte) (string, []Input, error) {
 		}
 		var out []Input
 		for _, f := range gl {
-			out = append(out, Input{Tool: "gitleaks", RuleID: f.RuleID, File: f.File, Commit: f.Commit, Secret: f.Secret,
-				Match: f.Match, StartLine: f.StartLine, EndLine: f.EndLine, Redacted: isRedacted(f.Secret)})
+			out = append(out, finish(Input{Tool: "gitleaks", RuleID: f.RuleID, File: f.File, Commit: f.Commit, Secret: f.Secret,
+				Match: f.Match, StartLine: f.StartLine, EndLine: f.EndLine}))
 		}
 		return "gitleaks", out, nil
 	}
@@ -66,10 +93,6 @@ func Parse(data []byte) (string, []Input, error) {
 		return parseSARIF(trim)
 	}
 	return parseTrufflehog(trim)
-}
-
-func isRedacted(s string) bool {
-	return s == "" || strings.Contains(s, "REDACTED") || strings.Trim(s, "*") == ""
 }
 
 func parseSARIF(data []byte) (string, []Input, error) {
@@ -112,8 +135,7 @@ func parseSARIF(data []byte) (string, []Input, error) {
 				in.Secret = pl.Region.Snippet.Text
 			}
 			in.Commit = r.PartialFingerprints["commitSha"]
-			in.Redacted = isRedacted(in.Secret)
-			out = append(out, in)
+			out = append(out, finish(in))
 		}
 	}
 	return "sarif", out, nil
@@ -146,11 +168,11 @@ func parseTrufflehog(data []byte) (string, []Input, error) {
 		if r.DetectorName == "" && r.Raw == "" {
 			continue // log line
 		}
-		in := Input{Tool: "trufflehog", RuleID: r.DetectorName, Secret: r.Raw, Verified: r.Verified, Redacted: r.Raw == ""}
+		in := Input{Tool: "trufflehog", RuleID: r.DetectorName, Secret: r.Raw, Verified: r.Verified}
 		for _, d := range r.SourceMetadata.Data {
 			in.File, in.StartLine, in.Commit = d.File, d.Line, d.Commit
 		}
-		out = append(out, in)
+		out = append(out, finish(in))
 	}
 	return "trufflehog", out, sc.Err()
 }
@@ -168,35 +190,108 @@ type Triager struct {
 	Root  string
 	cache map[string]detect.Result
 	text  map[string]string
+	why   map[string]string
 }
 
 // New returns a triager.
 func New(det *detect.Detector, root string) *Triager {
-	return &Triager{Det: det, Root: root, cache: map[string]detect.Result{}, text: map[string]string{}}
+	return &Triager{Det: det, Root: root, cache: map[string]detect.Result{}, text: map[string]string{}, why: map[string]string{}}
 }
 
-func (t *Triager) source(in Input) (string, bool) {
+var commitRe = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
+
+// resolve maps a report path to a path inside Root, refusing absolute paths
+// outside it, ../ traversal and symlinks that escape it.
+func (t *Triager) resolve(file string) (string, string, error) {
+	root, err := filepath.Abs(t.Root)
+	if err != nil {
+		return "", "", err
+	}
+	if r, err := filepath.EvalSymlinks(root); err == nil {
+		root = r
+	}
+	p := filepath.FromSlash(file)
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(root, p)
+	}
+	p = filepath.Clean(p)
+	inside := func(x string) (string, bool) {
+		rel, err := filepath.Rel(root, x)
+		return rel, err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+	}
+	rel, ok := inside(p)
+	if !ok {
+		return "", "", fmt.Errorf("path outside --root")
+	}
+	if real, err := filepath.EvalSymlinks(p); err == nil {
+		if _, ok := inside(real); !ok {
+			return "", "", fmt.Errorf("symlink resolves outside --root")
+		}
+	}
+	return p, filepath.ToSlash(rel), nil
+}
+
+// source loads the file content the finding refers to. A finding from a
+// commit is only ever evaluated against that commit's version: if it cannot
+// be read, the finding stays uncorroborated (no working-tree substitution).
+func (t *Triager) source(in Input) (string, string) {
 	key := in.Commit + "\x00" + in.File
 	if s, ok := t.text[key]; ok {
-		return s, s != ""
+		return s, t.why[key]
 	}
-	var data []byte
+	set := func(s, why string) (string, string) {
+		t.text[key], t.why[key] = s, why
+		return s, why
+	}
+	abs, rel, err := t.resolve(in.File)
+	if err != nil {
+		return set("", err.Error()+"; not read")
+	}
 	if in.Commit != "" {
-		if out, err := exec.Command("git", "-C", t.Root, "show", in.Commit+":"+filepath.ToSlash(in.File)).Output(); err == nil {
-			data = out
+		if !commitRe.MatchString(in.Commit) {
+			return set("", "invalid commit id in report")
+		}
+		out, err := exec.Command("git", "-C", t.Root, "show", "--no-textconv", in.Commit+":"+rel).Output()
+		if err != nil {
+			return set("", "source at commit "+in.Commit[:min(10, len(in.Commit))]+" unavailable (no working-tree substitution)")
+		}
+		return set(string(out), "")
+	}
+	b, err := os.ReadFile(abs)
+	if err != nil {
+		return set("", "source file unreadable")
+	}
+	if len(b) > 8<<20 {
+		return set("", "source file too large to re-check")
+	}
+	return set(string(b), "")
+}
+
+// probe is the text expected at the reported location (full value or prefix).
+func (in Input) probe() string {
+	if !in.Redacted {
+		return in.Secret
+	}
+	return in.Prefix
+}
+
+// matches compares a value secretscan saw with the reported one.
+func (in Input) matches(ours string) bool {
+	if !in.Redacted {
+		return overlaps(ours, in.Secret)
+	}
+	return in.Prefix != "" && strings.HasPrefix(ours, in.Prefix)
+}
+
+func valueNear(text, probe string, start, end int) bool {
+	lp := strings.ToLower(probe) // case-insensitive rules report the matched text in any case
+	for n := max(1, start-1); n <= end+1; n++ {
+		if strings.Contains(strings.ToLower(lineAt(text, n)), lp) {
+			return true
 		}
 	}
-	if data == nil {
-		p := in.File
-		if !filepath.IsAbs(p) {
-			p = filepath.Join(t.Root, p)
-		}
-		if b, err := os.ReadFile(p); err == nil && len(b) <= 8<<20 {
-			data = b
-		}
-	}
-	t.text[key] = string(data)
-	return string(data), data != nil
+	// Multi-line values (keys) or very long lines: fall back to the region.
+	return strings.Contains(text, probe) && len(probe) > 200
 }
 
 func overlaps(a, b string) bool {
@@ -219,14 +314,20 @@ func (t *Triager) Evaluate(in Input) detect.Finding {
 		f.Evidence = []string{"verified live by " + in.Tool}
 		return f
 	}
-	text, ok := t.source(in)
-	if !ok {
+	text, why := t.source(in)
+	if why != "" {
 		f.Triage = Uncorroborated
-		f.Evidence = []string{"source not available to re-check (kept for review)"}
+		f.Evidence = []string{why + " (kept for review)"}
 		return f
 	}
 	if in.StartLine > 0 {
 		f.Line = lineAt(text, in.StartLine)
+	}
+	// Stale report: the reported value is no longer on the reported lines.
+	if probe := in.probe(); probe != "" && in.StartLine > 0 && !valueNear(text, probe, in.StartLine, max(in.StartLine, in.EndLine)) {
+		f.Triage = Uncorroborated
+		f.Evidence = []string{"source changed since the report: value not found at the reported line (kept for review)"}
+		return f
 	}
 	key := in.Commit + "\x00" + in.File
 	res, done := t.cache[key]
@@ -236,24 +337,29 @@ func (t *Triager) Evaluate(in Input) detect.Finding {
 	}
 	// 1. secretscan independently reports it.
 	for _, o := range res.Findings {
-		if near(o.StartLine, in.StartLine) && (overlaps(o.Secret, in.Secret) || (in.Redacted && o.StartLine == in.StartLine)) {
+		if near(o.StartLine, in.StartLine) && (in.matches(o.Secret) || (in.Redacted && in.Prefix == "" && o.StartLine == in.StartLine)) {
 			f.Triage, f.Confidence = Confirmed, o.Confidence
 			f.Evidence = append([]string{"also reported by secretscan rule " + o.RuleID}, o.Evidence...)
 			return f
 		}
 	}
-	if in.Redacted {
-		f.Triage = Uncorroborated
-		f.Evidence = []string{"secret redacted in the source report; re-run it unredacted to triage (kept for review)"}
-		return f
-	}
 	// 2. secretscan saw the candidate and filtered it, with a reason.
+	// Works with partially redacted reports (prefix match).
 	for _, s := range res.Suppressed {
-		if near(s.StartLine, in.StartLine) && overlaps(s.Secret, in.Secret) {
+		if near(s.StartLine, in.StartLine) && in.matches(s.Secret) {
 			f.Triage, f.Confidence = Filtered+": "+s.Reason, detect.Low
 			f.Evidence = []string{"secretscan " + s.RuleID + " filtered this value: " + s.Reason}
 			return f
 		}
+	}
+	if in.Redacted {
+		f.Triage = Uncorroborated
+		why := "secret fully redacted in the report"
+		if in.Prefix != "" {
+			why = "partially redacted value not matched by secretscan"
+		}
+		f.Evidence = []string{why + " (kept for review)"}
+		return f
 	}
 	// 3. Context: the match is a slice of a digest, hash or longer token.
 	if why := detect.EmbeddedReason(f.Line, in.Secret); why != "" {

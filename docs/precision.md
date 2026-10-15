@@ -61,7 +61,7 @@ confidence, and one the provider rejects is low.
 
 ### Policies
 
-| | strict (default) | balanced |
+| | strict (default for scans and CI) | balanced (default for git hooks) |
 |---|---|---|
 | high confidence | blocks | blocks |
 | medium / low | blocks | listed under **Needs review**, does not block |
@@ -73,8 +73,10 @@ hook (it is still printed). On the benchmark that is 1 of 529 labeled secrets.
 Unstructured values (generic matches) in test/example files are capped at
 medium, since without a provider format they are most likely fixtures.
 Set it per run (`--policy balanced`), per hook
-(`secretscan install-hook --policy balanced`) or per repo (`policy = "balanced"`
-in `.secretscan.toml`). CI SARIF levels follow the policy: blocking findings
+(`secretscan install-hook --policy strict`) or per repo (`policy = "balanced"`
+in `.secretscan.toml`). Hooks default to balanced because an interrupted
+commit on ambiguous evidence is what drives developers to bypass hooks; CI
+defaults to strict so nothing ambiguous merges without a decision. CI SARIF levels follow the policy: blocking findings
 are `error`, the rest `warning`/`note`.
 
 Uncertainty never silently becomes a pass:
@@ -110,9 +112,15 @@ proving it does not hide a valid secret next to it
 analysis, so you can keep existing detection rules and cut the noise:
 
 ```sh
-gitleaks dir . -f json -r gitleaks.json            # unredacted, so values can be re-checked
-secretscan triage gitleaks.json --policy balanced  # or trufflehog JSON lines, or any SARIF
+gitleaks dir . -f json -r - | secretscan triage - --policy balanced   # streamed: no copy on disk
+gitleaks dir . -f json -r - --redact=50 | secretscan triage -          # half-redacted: prefix matching
+secretscan triage /tmp/gl.json --delete-input                         # file: removed after reading
 ```
+
+A report file is a copy of every secret it lists. Prefer the stream; with a
+file, keep it outside the repository with 0600 permissions (secretscan warns
+otherwise) and delete it. Source is read only inside `--root`, and a
+history finding is checked against the file at its own commit or not at all.
 
 Each finding becomes one of:
 
@@ -147,16 +155,36 @@ and filtered findings stay in JSON/SARIF output with their reason.
   plus randomized variants of each class (digests, SRCREV hashes, patch
   checksums, vault key names, identifiers, schema names, docker args,
   base64 payloads, checksums, UUIDs);
-- **recall safety of filters**: `TestNoiseFiltersSpareRandomSecrets` runs
-  20,000 random secrets through the generic pipeline in CI and fails if
-  filters remove more than 0.01% (measured: under 0.005% on 200,000);
+- **recall safety of filters**: `TestFalseNegativesPerAlphabet` runs 20,000
+  random secrets per alphabet (alphanumeric, hex, base64, base64url, base32,
+  passwords, lowercase+digits) through the generic pipeline in CI and fails
+  if filters remove more than 0.02% of any alphabet; each filter also has
+  keep / reject / borderline cases (`TestFilterAdversarialCases`);
 - **package corpora**: 52 popular npm/PyPI packages (~900 MB) where no live
   secret is expected. Findings there are mostly documentation examples and
   test fixtures, reported as findings per 1,000 files;
 - **latency**: p50/p95 wall time of a staged-changes scan over 60 synthetic
   commits.
 
-Results are in the [README](../README.md#benchmark). Caveats: the labeled secrets are generated (no
-real credentials), the issue set reproduces only cases whose text the issues
-quote, and trufflehog is not run directly (it needs a newer Go toolchain and
-network-fetched dependencies). Its report format is supported by `triage`.
+- **independent ground truth**: [leaky-repo](https://github.com/Plazmaz/leaky-repo),
+  scored with its own labels and method (`bench/leaky_repo.py`);
+- **adjudication**: every corpus finding is labeled by hand as
+  `not-a-secret`, `example-credential` or `live-credential`
+  (`bench/corpus_labels.tsv`, `bench/adjudicate.py`).
+
+Results are in [bench/results/](../bench/results/2026-10-15.md).
+
+## Limitations
+
+- The labeled secrets and the issue set are this project's own; they are
+  a regression suite. The only independent measurement is the first
+  leaky-repo run, and leaky-repo is small (96 risk lines).
+- Nobody outside the project has reproduced the results yet, and trufflehog
+  has not been run directly.
+- Filters are heuristics. Known gaps, pinned as "borderline" tests:
+  passphrases made only of dictionary words under a generic key, UUID-shaped
+  secrets without a provider rule, a literal placeholder word used as a real
+  password (`password = "password"`), password hashes, and values below the
+  rule's entropy threshold.
+- Weak dictionary passwords (`admin123`) are reported at low confidence, so
+  under balanced they are listed for review rather than blocked.

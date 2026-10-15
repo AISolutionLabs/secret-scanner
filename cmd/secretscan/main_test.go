@@ -331,8 +331,13 @@ func TestFixStagedAndPatchWarning(t *testing.T) {
 		t.Errorf("patch file should be 0600: %v", err)
 	}
 	os.Remove(filepath.Join(repo, "fix.diff"))
+	// Non-interactive --fix without --yes refuses to touch files.
 	r = run(t, repo, "", "git", "--staged", "--fix")
-	if !strings.Contains(r.stderr, "fixed 1 literal(s)") {
+	if r.code != 2 || !strings.Contains(r.stderr, "refusing to rewrite") {
+		t.Fatalf("--fix without review should refuse: %+v", r)
+	}
+	r = run(t, repo, "", "git", "--staged", "--fix", "--yes")
+	if !strings.Contains(r.stderr, "fixed 1 literal(s)") || !strings.Contains(r.stderr, `os.Getenv returns ""`) {
 		t.Fatalf("fix: %s", r.stderr)
 	}
 	b, _ := os.ReadFile(filepath.Join(repo, "svc/main.go"))
@@ -399,7 +404,8 @@ func TestBalancedHook(t *testing.T) {
 	if out, err := gitCmd(t, repo, "init", "-q", "-b", "main"); err != nil {
 		t.Fatal(out)
 	}
-	if r := run(t, repo, "", "install-hook", "--policy", "balanced"); r.code != 0 {
+	// Hooks default to balanced (no --policy needed) and say so.
+	if r := run(t, repo, "", "install-hook"); r.code != 0 || !strings.Contains(r.stdout, "policy: balanced") || !strings.Contains(r.stdout, "do NOT") {
 		t.Fatalf("install: %+v", r)
 	}
 	writeFile(t, filepath.Join(repo, "tests/test_cfg.py"), "client_secret = \"Zq7wPv2kLm9xR4\"\n")
@@ -410,8 +416,21 @@ func TestBalancedHook(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(repo, "app.py"), "GH = \""+pat()+"\"\n")
 	gitCmd(t, repo, "add", ".")
-	if out, err := gitCmd(t, repo, "commit", "-qm", "token"); err == nil {
+	out, err = gitCmd(t, repo, "commit", "-qm", "token")
+	if err == nil {
 		t.Fatalf("balanced hook must block a provider token:\n%s", out)
+	}
+	if !strings.Contains(out, "why:") || !strings.Contains(out, "provider-specific format") {
+		t.Errorf("hook must explain every blocked finding:\n%s", out)
+	}
+	// A repo config policy overrides the hook default.
+	writeFile(t, filepath.Join(repo, ".secretscan.toml"), "policy = \"strict\"\n")
+	os.Remove(filepath.Join(repo, "app.py"))
+	gitCmd(t, repo, "add", "-A")
+	writeFile(t, filepath.Join(repo, "tests/test_more.py"), "client_secret = \"Kq8wPv2kLm9xR5\"\n")
+	gitCmd(t, repo, "add", ".")
+	if out, err := gitCmd(t, repo, "commit", "-qm", "strict via config"); err == nil {
+		t.Errorf("config strict should override hook default:\n%s", out)
 	}
 	if r := run(t, repo, "", "install-hook", "--policy", "yolo"); r.code != 2 {
 		t.Errorf("bad hook policy should exit 2")
@@ -442,5 +461,60 @@ func TestTriageCLI(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "gl2.json"), string(rep))
 	if r := run(t, dir, "", "triage", "gl2.json"); r.code != 0 {
 		t.Errorf("only noise should not block: %+v", r)
+	}
+}
+
+func TestTriageReportHandling(t *testing.T) {
+	dir := t.TempDir()
+	p := pat()
+	writeFile(t, filepath.Join(dir, "app.py"), "GH = \""+p+"\"\n")
+	rep, _ := json.Marshal([]map[string]any{{"RuleID": "github-pat", "File": "app.py", "StartLine": 1, "Secret": p}})
+	writeFile(t, filepath.Join(dir, "gl.json"), string(rep))
+	os.Chmod(filepath.Join(dir, "gl.json"), 0o644)
+	r := run(t, dir, "", "triage", "gl.json")
+	if !strings.Contains(r.stderr, "contains 1 unredacted secret") || !strings.Contains(r.stderr, "readable by other users") {
+		t.Errorf("expected unredacted/permission warnings: %s", r.stderr)
+	}
+	r = run(t, dir, "", "triage", "gl.json", "--delete-input")
+	if _, err := os.Stat(filepath.Join(dir, "gl.json")); !os.IsNotExist(err) || r.code != 1 {
+		t.Errorf("--delete-input should remove the report and still triage: %+v", r)
+	}
+	// Streaming from stdin keeps nothing on disk.
+	r = run(t, dir, string(rep), "triage", "-")
+	if r.code != 1 || !strings.Contains(r.stderr, "1 confirmed") || strings.Contains(r.stderr, "unredacted") {
+		t.Errorf("stdin triage: %+v", r)
+	}
+	// Partially redacted report (gitleaks --redact=50 format).
+	red, _ := json.Marshal([]map[string]any{{"RuleID": "github-pat", "File": "app.py", "StartLine": 1, "Secret": p[:20] + "..."}})
+	if r := run(t, dir, string(red), "triage", "-"); !strings.Contains(r.stderr, "1 confirmed") {
+		t.Errorf("partially redacted: %s", r.stderr)
+	}
+}
+
+// The stats format is for sharing results publicly: counts only.
+func TestStatsReportIsAnonymous(t *testing.T) {
+	dir := t.TempDir()
+	tok := pat()
+	writeFile(t, filepath.Join(dir, "secret-dir/app.py"), "GH = \""+tok+"\"\n")
+	r := run(t, dir, "", "dir", ".", "-f", "stats", "--policy", "balanced", "--no-color")
+	if r.code != 1 {
+		t.Fatalf("exit code %d: %+v", r.code, r)
+	}
+	var s struct {
+		Findings, Blocking int
+		Policy             string
+		ByRule             map[string]int
+		ByFileType         map[string]int
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &s); err != nil {
+		t.Fatalf("%v\n%s", err, r.stdout)
+	}
+	if s.Findings != 1 || s.Blocking != 1 || s.Policy != "balanced" || s.ByFileType[".py"] != 1 || len(s.ByRule) != 1 {
+		t.Errorf("stats = %+v", s)
+	}
+	for _, leak := range []string{tok[:12], "secret-dir", "app.py", "Fingerprint"} {
+		if strings.Contains(r.stdout, leak) {
+			t.Errorf("stats output leaks %q:\n%s", leak, r.stdout)
+		}
 	}
 }

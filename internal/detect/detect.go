@@ -296,6 +296,10 @@ func (d *Detector) hits(text, lower, path string) ([]hit, []drop) {
 						dropIt("identifier")
 						continue
 					}
+					if echoesKeyName(sub[m[0]:s], secret) {
+						dropIt("echoes-key-name")
+						continue
+					}
 					if why := genericNoise(secret, quoted, path); why != "" {
 						dropIt(why)
 						continue
@@ -443,24 +447,45 @@ func genericNoise(secret string, quoted bool, path string) string {
 		return "word-segments" // oauth-2025-04-20, v2-beta
 	}
 	hasDigit := strings.IndexFunc(secret, unicode.IsDigit) >= 0
-	if !hasDigit && isSingleCaseLetters(secret) {
+	w := wordy.Wordiness(secret)
+	if !hasDigit && isSingleCaseLetters(secret) && w >= 0.5 {
 		return "single-case-letters" // nextkeyfrompreviousresponse, SOMECONSTANT
 	}
-	w := wordy.Wordiness(secret)
 	// Identifier-shaped values (clean camelCase / snake_case) need less
 	// word evidence than arbitrary strings, whose mixed case and inner digits
 	// make chance word runs more likely.
 	clean := cleanIdentifier(secret)
-	if (clean && w >= 0.6) || (w >= 0.75 && digitFraction(secret) <= 0.2) {
+	// Identifiers are mostly letters; short symbol-heavy passwords can look
+	// "wordy" by chance because they contain few letters.
+	if letterFraction(secret) >= 0.85 && ((clean && w >= 0.6) || (w >= 0.75 && digitFraction(secret) <= 0.2)) {
 		return "word-like" // SecurityProfiles, accessTokenProvider
 	}
 	if camelWords(secret) {
 		return "camel-case-identifier" // V1DownwardAPIProjection, IntegrationSummaries
 	}
+	if wordTokens(secret) {
+		return "word-tokens" // headersToExcludeInCacheKey, keyboard/mouse, 0011_update_proxy_permissions
+	}
+	if concatExpr.MatchString(secret) {
+		return "string-concatenation" // key="'+value1.key+'"
+	}
+	if emailAddress.MatchString(secret) {
+		return "email-address"
+	}
 	if dottedNamespace(secret) {
 		return "dotted-namespace" // es6.symbol, core-js.es7.map
 	}
-	if !hasDigit && (strings.ContainsAny(secret, "./_-") || w >= 0.65 || (clean && w >= 0.5)) {
+	if namedSegments(secret) {
+		return "credential-name" // inf-vsqt-01-secret-id, my-app_api-key: names of secrets, not values
+	}
+	// Stopwords (gitleaks-style) only when the value is word-like overall:
+	// "MySecretToken2024!" or "aSecretTokenValue9x7K" may be real credentials.
+	if clean && w >= 0.6 && containsStopword(secret) {
+		return "stopword"
+	}
+	// Digit-free names and paths: separators alone are not evidence (random
+	// passwords contain - and _), so the value must also read as words.
+	if !hasDigit && (w >= 0.75 || (clean && w >= 0.5) || (lettersAndSeps(secret) && w >= 0.5)) {
 		return "digit-free-name-or-path" // esnext.map.group-by
 	}
 	if strings.ContainsAny(secret, pwSymbols) && !quoted && !envishPath.MatchString(path) {
@@ -501,8 +526,9 @@ func isSequential(secret string) bool {
 	if len(secret) >= 8 && len(secret)%4 == 0 {
 		if b, err := base64.StdEncoding.DecodeString(secret); err == nil && printable(string(b)) {
 			d := string(b)
-			// Encoded prose or JSON ("a secret", {"foo": "bar"}) is test data.
-			return check(d) || Shannon(d) < 3.0 || strings.ContainsAny(d, " {}") || wordy.Wordiness(d) >= 0.6
+			// Encoded prose or JSON ("a secret", {"foo": "bar"}) is test data;
+			// an encoded password ("ChickenDinner98") is not.
+			return check(d) || Shannon(d) < 3.0 || strings.ContainsAny(d, " {}\"\n")
 		}
 	}
 	if strings.Count(secret, "%") >= 2 {
@@ -525,6 +551,7 @@ func segmentsAreWords(s string) bool {
 	if len(parts) < 2 {
 		return false
 	}
+	words := 0
 	for _, p := range parts {
 		digits, letters := 0, 0
 		for i := 0; i < len(p); i++ {
@@ -538,12 +565,16 @@ func segmentsAreWords(s string) bool {
 		switch {
 		case digits == len(p):
 		case digits+letters == len(p) && len(p) <= 4 && digits > 0: // es6, v2, utf8, KRB5
-		case letters == len(p) && (len(p) <= 3 || wordy.Score(p) > wordy.Threshold):
+		case letters == len(p) && len(p) >= 4 && wordy.Score(p) > wordy.Threshold:
+			words++
+		case letters == len(p) && len(p) <= 3:
 		default:
 			return false
 		}
 	}
-	return true
+	// At least one real word: random grouped keys (x7k2-9fj3-qq81, abc-xyz-qwe)
+	// are made only of short or numeric groups.
+	return words > 0
 }
 
 // camelWords reports type and field names: at least two capitalized,
@@ -577,6 +608,83 @@ func camelWords(s string) bool {
 	}
 	return letters > 0 && words >= 2 && float64(covered)/float64(letters) >= 0.85
 }
+
+var placeholderPrefix = regexp.MustCompile(`(?i)^(?:my|your|example|sample|some|test|dummy|fake)[_-]?`)
+
+// echoesKeyName reports doc placeholders that repeat the key they are
+// assigned to ("webhookKey": "my_webhookKey"). A random value containing its
+// own 5+ character key name does not happen by chance.
+func echoesKeyName(before, secret string) bool {
+	rest := placeholderPrefix.ReplaceAllString(secret, "")
+	if rest == secret || len(rest) < 5 {
+		return false
+	}
+	return strings.Contains(strings.ToLower(before), strings.ToLower(rest))
+}
+
+// shortWords are common 2-3 letter tokens in identifiers. They count toward
+// coverage but never as one of the (at least two) real words required.
+var shortWords = map[string]bool{
+	"my": true, "is": true, "to": true, "in": true, "of": true, "on": true, "by": true, "at": true, "as": true, "no": true,
+	"id": true, "ids": true, "key": true, "api": true, "url": true, "uri": true, "get": true, "set": true, "for": true,
+	"the": true, "and": true, "new": true, "old": true, "max": true, "min": true, "use": true, "via": true, "raw": true,
+	"sha": true, "md": true, "b": true, "x": true, "app": true, "env": true, "org": true, "com": true, "net": true,
+}
+
+// concatExpr is a property access spliced into a string: '+obj.field+'.
+var concatExpr = regexp.MustCompile(`^\+[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+\+?$|^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+\+$`)
+
+var emailAddress = regexp.MustCompile(`^[A-Za-z][\w.+-]*@[A-Za-z][\w-]*(?:\.[A-Za-z][\w-]*)+$`)
+
+// wordTokens reports whether a value is made of words: split on case
+// changes and non-letters, at least two tokens of 4+ letters score as words,
+// and word or common short tokens cover 85% of the letters. Random strings
+// split into short, unpronounceable fragments, so they fail coverage; the
+// per-alphabet false-negative test pins this.
+func wordTokens(s string) bool {
+	if digitFraction(s) > 0.25 {
+		return false
+	}
+	letters := 0
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' {
+			letters++
+		}
+	}
+	words, covered := 0, 0
+	var toks []string
+	// Only separators and case changes split words. A chunk with digits in
+	// the middle (kq3update7xz) is not words, whatever its letters spell.
+	for _, chunk := range strings.FieldsFunc(s, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9')
+	}) {
+		core := strings.Trim(chunk, "0123456789")
+		if strings.ContainsAny(core, "0123456789") {
+			continue
+		}
+		toks = append(toks, wordy.Tokens(core)...)
+	}
+	seps := strings.ContainsAny(s, "_-./:#@ ")
+	for _, w := range toks {
+		lw := strings.ToLower(w)
+		if !seps && len(w) > 4 && strings.ToUpper(w) == w {
+			continue // a long all-caps run without separators is base32, not a word
+		}
+		switch {
+		case len(w) >= 4 && len(w) <= 16 && (wordy.Score(lw) > wordy.Threshold || len(w) >= 5 && wordy.Score(lw) > wordy.Threshold-wordSlack):
+			words++
+			covered += len(w)
+		case shortWords[lw]:
+			covered += len(w)
+		}
+	}
+	cov := float64(covered) / float64(letters)
+	return letters >= 8 && (words >= 2 && cov >= 0.85 || words >= 1 && cov == 1 && len(toks) >= 3)
+}
+
+// wordSlack lets longer real words the bigram model scores low (proxy,
+// webhook, keyboard) count; coverage still has to hold across the value.
+const wordSlack = 0.75
 
 // dottedNamespace matches lowercase module/feature paths (es6.symbol,
 // web.dom-collections.iterator) with at most one digit per segment.
@@ -718,6 +826,62 @@ func cleanIdentifier(s string) bool {
 		}
 	}
 	return len(toks) >= 2 && caps <= 1 && short <= 1
+}
+
+var credSegment = map[string]bool{"secret": true, "secrets": true, "token": true, "key": true, "apikey": true,
+	"password": true, "passwd": true, "pass": true, "credential": true, "credentials": true, "creds": true, "auth": true}
+
+// namedSegments reports separator-delimited names with a whole segment that
+// is a credential word ("-secret-", "_token", ".key"), e.g. a Vault key name.
+func namedSegments(s string) bool {
+	parts := strings.FieldsFunc(s, func(r rune) bool { return r == '-' || r == '_' || r == '.' || r == '/' })
+	if len(parts) < 3 {
+		return false
+	}
+	for _, p := range parts {
+		if credSegment[strings.ToLower(p)] {
+			return true
+		}
+	}
+	return false
+}
+
+// lettersAndSeps reports names/paths: only letters and . / _ -, with at
+// least one separator.
+func lettersAndSeps(s string) bool {
+	if !strings.ContainsAny(s, "./_-") {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '.' || c == '/' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func containsStopword(s string) bool {
+	ls := strings.ToLower(s)
+	for _, w := range config.GenericStopwords {
+		if strings.Contains(ls, w) {
+			return true
+		}
+	}
+	return false
+}
+
+func letterFraction(s string) float64 {
+	if s == "" {
+		return 0
+	}
+	n := 0
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' {
+			n++
+		}
+	}
+	return float64(n) / float64(len(s))
 }
 
 func digitFraction(s string) float64 {

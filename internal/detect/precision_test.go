@@ -185,7 +185,10 @@ func TestNoiseFiltersSpareRandomSecrets(t *testing.T) {
 	rs, _ := config.Compile(cfg)
 	d := detect.New(rs, detect.Options{RecordSuppressed: true})
 	filtered, belowEntropy := map[string]int{}, 0
-	const n = 20000
+	if testing.Short() || raceEnabled {
+		t.Skip("statistical: needs the full sample; CI runs it in a separate non-race step")
+	}
+	n := 20000
 	for i := 0; i < n; i++ {
 		v := g(alnum, 16+i%30)
 		res := d.Scan(detect.Fragment{Raw: `api_secret = "` + v + `"`, FilePath: "src/app.py"})
