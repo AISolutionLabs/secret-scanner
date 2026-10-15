@@ -4,10 +4,17 @@ All notable changes are listed here. The project follows
 [Semantic Versioning](https://semver.org); see [docs/compatibility.md](docs/compatibility.md)
 for what counts as a breaking change.
 
-## Unreleased
+## 1.0.0 - 2026-10-15
 
-Changes made in response to an external review (benchmark rigor, default
-policy, filter safety, triage and `--fix` safety, release hygiene).
+First public release: 129 rules, gitleaks-compatible config and reports,
+staged/push/history/diff scanning, git hooks, noise filters with a
+suppression ledger, confidence levels and strict/balanced policies, `triage`
+for other scanners' reports, live verification, remediation guidance and
+`explain`. Benchmark results: [bench/results/2026-10-15.md](https://github.com/AISolutionLabs/secret-scanner/blob/v1.0.0/bench/results/2026-10-15.md).
+
+Changes since the first public commit, made in response to an external
+review (benchmark rigor, default policy, filter safety, triage and `--fix`
+safety, release hygiene):
 
 ### Detection
 - New rules for formats an independent benchmark (leaky-repo) showed were
@@ -49,10 +56,3 @@ policy, filter safety, triage and `--fix` safety, release hygiene).
   hand labels for every corpus finding, pinned corpus versions, per-alphabet
   false-negative measurement, and dated results in `bench/results/`.
 - README claims now lead with independent data and list misses and limits.
-
-## 1.0.0 (not yet tagged)
-
-First public version: 120+ rules, gitleaks-compatible config and reports,
-staged/push/history/diff scanning, git hooks, noise filters with a
-suppression ledger, confidence and policies, `triage` for other scanners'
-reports, verification, remediation guidance and `explain`.
