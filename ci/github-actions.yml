@@ -1,0 +1,27 @@
+# GitHub Actions: scan pushed/PR commits and upload SARIF to code scanning.
+name: secretscan
+on: [push, pull_request]
+permissions:
+  contents: read
+  security-events: write
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.24' }
+      - run: go install github.com/anirudh/secretscan/cmd/secretscan@latest
+      - name: Scan
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RANGE="origin/${{ github.base_ref }}..HEAD"
+          else
+            RANGE="${{ github.event.before }}..${{ github.sha }}"
+            git cat-file -e "${{ github.event.before }}" 2>/dev/null || RANGE="--all"
+          fi
+          secretscan git --log-opts "$RANGE" -r secretscan.sarif --no-color
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with: { sarif_file: secretscan.sarif }

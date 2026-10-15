@@ -1,0 +1,35 @@
+# Azure DevOps: scan the PR's new commits (or the full history on main) and
+# publish SARIF for the "Scans" tab (SARIF SAST Scans Tab extension).
+trigger: [main]
+pr: [main]
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - checkout: self
+    fetchDepth: 0
+
+  - task: GoTool@0
+    inputs: { version: '1.24' }
+
+  - script: go install github.com/anirudh/secretscan/cmd/secretscan@latest
+    displayName: Install secretscan
+
+  - script: |
+      set -e
+      if [ -n "$(System.PullRequest.TargetBranch)" ]; then
+        TARGET="origin/${SYSTEM_PULLREQUEST_TARGETBRANCH#refs/heads/}"
+        RANGE="$TARGET..HEAD"
+      else
+        RANGE="--all"
+      fi
+      "$(go env GOPATH)/bin/secretscan" git --log-opts "$RANGE" \
+        -r "$(Build.ArtifactStagingDirectory)/CodeAnalysisLogs/secretscan.sarif" --no-color
+    displayName: Secret scan
+
+  - task: PublishBuildArtifacts@1
+    condition: always()
+    inputs:
+      PathtoPublish: $(Build.ArtifactStagingDirectory)/CodeAnalysisLogs
+      ArtifactName: CodeAnalysisLogs

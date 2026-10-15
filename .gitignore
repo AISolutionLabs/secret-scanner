@@ -1,0 +1,6 @@
+bin/
+dist/
+*.sarif
+secretscan-report.*
+*.test
+*.out

@@ -1,0 +1,346 @@
+package config
+
+import "strings"
+
+// tok wraps a prefixed token: word boundary before, and no further token
+// characters after, so longer strings that merely contain the shape are skipped.
+// Base64 punctuation (+ /) is excluded on both sides so tokens are not
+// "found" in the middle of encoded blobs.
+func tok(secret string) string {
+	return `(?:^|[^0-9A-Za-z_+/-])(` + secret + `)(?:[^0-9A-Za-z_+/-]|$)`
+}
+
+// semi builds a "keyword near an assignment" regex (same idea as gitleaks'
+// semi-generic rules): identifier, optional suffix, an operator, optional
+// quote, then the secret in group 1.
+func semi(ids []string, secret string, caseInsensitiveSecret bool) string {
+	p := `[\w.-]{0,50}?(?i:` + strings.Join(ids, "|") + `)(?:[ \t\w.-]{0,20})[\s'"]{0,3}` +
+		`(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)[\x60'"\s=]{0,5}(` + secret + `)(?:[\x60'"\s;,)\]}]|\\[nrt]|$)`
+	if caseInsensitiveSecret {
+		return `(?i)` + p
+	}
+	return p
+}
+
+const uuid = `[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`
+
+func r(id, desc, sev, regex string, keywords []string, tags ...string) Rule {
+	return Rule{ID: id, Description: desc, Severity: sev, Regex: regex, Keywords: keywords, Tags: tags}
+}
+
+func withEntropy(rule Rule, e float64) Rule { rule.Entropy = e; return rule }
+
+// DefaultRules is the built-in rule pack.
+func DefaultRules() []Rule {
+	rules := []Rule{
+		// --- Cloud: AWS ---------------------------------------------------
+		withEntropy(r("aws-access-key-id", "AWS access key ID", "critical",
+			tok(`(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16}`),
+			[]string{"akia", "asia", "abia", "acca", "a3t"}, "aws", "cloud"), 3.0),
+		withEntropy(r("aws-secret-access-key", "AWS secret access key", "critical",
+			semi([]string{`aws_?(?:secret_?(?:access_?)?key|sk)`, `secretaccesskey`}, `[A-Za-z0-9/+]{40}`, false),
+			[]string{"aws", "secretaccesskey"}, "aws", "cloud"), 4.0),
+		withEntropy(r("aws-session-token", "AWS session token", "high",
+			semi([]string{`aws_?session_?token`, `sessiontoken`}, `[A-Za-z0-9/+=]{100,1000}`, false),
+			[]string{"session"}, "aws", "cloud"), 4.0),
+		r("aws-bedrock-api-key", "AWS Bedrock API key", "critical",
+			tok(`ABSKQmVkcm9ja0FQSUtleS[A-Za-z0-9+/=]{40,300}|bedrock-api-key-[A-Za-z0-9+/=]{60,1000}`),
+			[]string{"absk", "bedrock-api-key-"}, "aws", "ai"),
+
+		// --- Cloud: Azure -------------------------------------------------
+		r("azure-ad-client-secret", "Azure AD / Entra ID client secret", "critical",
+			`(?:^|[\\'"\x60\s>=:(,)])([a-zA-Z0-9_~.]{3}\dQ~[a-zA-Z0-9_~.-]{31,34})(?:$|[\\'"\x60\s<),])`,
+			[]string{"q~"}, "azure", "cloud"),
+		r("azure-storage-connection-string", "Azure Storage / Cosmos DB account key in connection string", "critical",
+			`(?i)AccountKey=([A-Za-z0-9+/]{86}==)`, []string{"accountkey"}, "azure", "cloud"),
+		withEntropy(r("azure-storage-account-key", "Azure Storage account key", "critical",
+			semi([]string{`account_?key`, `storage_?(?:account_?)?key`, `azure_?storage_?key`, `primary_?key`}, `[A-Za-z0-9+/]{86}==`, false),
+			[]string{"key"}, "azure", "cloud"), 4.0),
+		r("azure-sas-token", "Azure shared access signature", "high",
+			`(?i)[?&]sig=([A-Za-z0-9%+/]{40,}(?:%3D){0,2}=?)`, []string{"sig="}, "azure", "cloud"),
+		r("azure-devops-pat", "Azure DevOps personal access token", "critical",
+			tok(`[A-Za-z0-9]{76}AZDO[A-Za-z0-9]{4}`), []string{"azdo"}, "azure", "vcs"),
+		withEntropy(r("azure-devops-pat-legacy", "Azure DevOps personal access token (legacy format)", "critical",
+			semi([]string{`ado`, `azure_?devops`, `azdo`, `devops`, `system_?accesstoken`, `\w*_pat`, `pat_\w*`}, `[a-z2-7]{52}`, false),
+			[]string{"ado", "devops", "azdo", "accesstoken", "_pat", "pat_"}, "azure", "vcs"), 3.5),
+		r("azure-openai-key", "Azure OpenAI API key", "high",
+			semi([]string{`azure_?openai(?:_?api)?_?key`, `aoai_?key`}, `[a-fA-F0-9]{32}|[A-Za-z0-9]{84}`, false),
+			[]string{"openai", "aoai"}, "azure", "ai"),
+		r("azure-apim-subscription-key", "Azure API Management subscription key", "medium",
+			semi([]string{`ocp-apim-subscription-key`, `apim_?(?:subscription_?)?key`}, `[a-fA-F0-9]{32}`, false),
+			[]string{"apim"}, "azure", "cloud"),
+		r("teams-webhook", "Microsoft Teams incoming webhook", "medium",
+			`(?i)(https://[a-z0-9-]+\.webhook\.office\.com/webhookb2/[a-z0-9-]+@[a-z0-9-]+/IncomingWebhook/[a-z0-9]+/[a-z0-9-]+)`,
+			[]string{"webhook.office.com"}, "webhook", "chat"),
+		r("power-automate-webhook", "Power Automate / Teams workflow webhook URL", "medium",
+			`(?i)(https://[a-z0-9.-]+\.logic\.azure\.com(?::443)?/workflows/[a-f0-9]+/triggers/[^\s"']+?sig=[\w-]{20,})`,
+			[]string{"logic.azure.com"}, "webhook", "azure"),
+
+		// --- Cloud: GCP / Google -----------------------------------------
+		r("gcp-api-key", "Google Cloud / Firebase API key", "high",
+			tok(`AIza[\w-]{35}`), []string{"aiza"}, "gcp", "cloud"),
+		r("gcp-service-account-key", "GCP service account private key ID", "critical",
+			`"private_key_id"\s*:\s*"([a-f0-9]{40})"`, []string{"private_key_id"}, "gcp", "cloud"),
+		r("gcp-oauth-client-secret", "Google OAuth client secret", "high",
+			tok(`GOCSPX-[\w-]{28}`), []string{"gocspx-"}, "gcp"),
+		r("gcp-oauth-access-token", "Google OAuth access token", "medium",
+			tok(`ya29\.[\w-]{30,}`), []string{"ya29."}, "gcp"),
+		r("firebase-fcm-server-key", "Firebase Cloud Messaging server key", "high",
+			tok(`AAAA[A-Za-z0-9_-]{7}:[A-Za-z0-9_-]{140}`), []string{"aaaa"}, "gcp"),
+
+		// --- Other clouds / PaaS -----------------------------------------
+		r("digitalocean-token", "DigitalOcean token", "critical",
+			tok(`do[por]_v1_[a-f0-9]{64}`), []string{"dop_v1_", "doo_v1_", "dor_v1_"}, "cloud"),
+		r("heroku-api-key", "Heroku API key", "high",
+			tok(`HRKU-AA[0-9A-Za-z_-]{58}`), []string{"hrku-"}, "cloud"),
+		r("heroku-api-key-legacy", "Heroku API key (legacy)", "high",
+			semi([]string{`heroku`}, uuid, false), []string{"heroku"}, "cloud"),
+		r("cloudflare-api-token", "Cloudflare API token or global key", "high",
+			semi([]string{`cloudflare`, `cf_?api`, `cf_?token`}, `[A-Za-z0-9_-]{40}|[a-f0-9]{37}`, false),
+			[]string{"cloudflare", "cf_"}, "cloud"),
+		r("alibaba-access-key-id", "Alibaba Cloud access key ID", "high",
+			tok(`LTAI[a-zA-Z0-9]{20}`), []string{"ltai"}, "cloud"),
+		r("ibm-cloud-api-key", "IBM Cloud API key", "high",
+			semi([]string{`ibm(?:_?cloud)?_?api_?key`}, `[A-Za-z0-9_-]{44}`, false), []string{"ibm"}, "cloud"),
+		r("oracle-oci-key-fingerprint", "OCI API signing key fingerprint with key file", "low",
+			semi([]string{`oci_?(?:cli_?)?fingerprint`}, `(?:[0-9a-f]{2}:){15}[0-9a-f]{2}`, false), []string{"fingerprint"}, "cloud"),
+
+		// --- Source control / CI -----------------------------------------
+		r("github-pat", "GitHub personal access token", "critical", tok(`ghp_[0-9a-zA-Z]{36}`), []string{"ghp_"}, "github", "vcs"),
+		r("github-fine-grained-pat", "GitHub fine-grained personal access token", "critical",
+			tok(`github_pat_[0-9a-zA-Z_]{82}`), []string{"github_pat_"}, "github", "vcs"),
+		r("github-oauth", "GitHub OAuth access token", "critical", tok(`gho_[0-9a-zA-Z]{36}`), []string{"gho_"}, "github", "vcs"),
+		r("github-app-token", "GitHub App user/installation token", "critical",
+			tok(`(?:ghu|ghs)_[0-9a-zA-Z]{36}`), []string{"ghu_", "ghs_"}, "github", "vcs"),
+		r("github-refresh-token", "GitHub refresh token", "critical", tok(`ghr_[0-9a-zA-Z]{36}`), []string{"ghr_"}, "github", "vcs"),
+		r("gitlab-pat", "GitLab personal access token", "critical",
+			tok(`glpat-[\w-]{20,}(?:\.[0-9a-z]{2}\.[0-9a-z]{9})?`), []string{"glpat-"}, "gitlab", "vcs"),
+		r("gitlab-pipeline-trigger-token", "GitLab pipeline trigger token", "high",
+			tok(`glptt-[0-9a-f]{40}`), []string{"glptt-"}, "gitlab", "vcs"),
+		r("gitlab-runner-registration-token", "GitLab runner registration token", "high",
+			tok(`GR1348941[\w-]{20}`), []string{"gr1348941"}, "gitlab", "vcs"),
+		r("gitlab-runner-token", "GitLab runner authentication token", "high",
+			tok(`glrt-[\w-]{20,}`), []string{"glrt-"}, "gitlab", "vcs"),
+		r("gitlab-deploy-token", "GitLab deploy token", "high", tok(`gldt-[\w-]{20,}`), []string{"gldt-"}, "gitlab", "vcs"),
+		r("gitlab-oauth-app-secret", "GitLab OAuth application secret", "high",
+			tok(`gloas-[\w-]{64}`), []string{"gloas-"}, "gitlab", "vcs"),
+		r("bitbucket-app-password", "Bitbucket app password", "high",
+			tok(`ATBB[A-Za-z0-9_=.-]{28,}`), []string{"atbb"}, "vcs"),
+		r("atlassian-api-token", "Atlassian (Jira/Confluence) API token", "high",
+			tok(`ATATT3[A-Za-z0-9_=-]{186}`), []string{"atatt3"}, "atlassian"),
+		withEntropy(r("atlassian-api-token-legacy", "Atlassian API token (legacy)", "medium",
+			semi([]string{`atlassian`, `confluence`, `jira`}, `[A-Za-z0-9]{24}`, false),
+			[]string{"atlassian", "confluence", "jira"}, "atlassian"), 3.5),
+		r("circleci-token", "CircleCI API token", "high",
+			semi([]string{`circle(?:ci)?_?(?:api_?)?token`}, `CCIPAT_[A-Za-z0-9]{22}_[a-f0-9]{40}|[a-f0-9]{40}`, false),
+			[]string{"circle"}, "ci"),
+		r("sonarqube-token", "SonarQube / SonarCloud token", "high",
+			tok(`sq[uap]_[a-f0-9]{40}`), []string{"squ_", "sqa_", "sqp_"}, "ci"),
+		r("snyk-token", "Snyk API token", "high", semi([]string{`snyk`}, uuid, false), []string{"snyk"}, "ci"),
+		r("terraform-cloud-token", "Terraform Cloud / Enterprise API token", "critical",
+			`(?i)\b([a-z0-9]{14}\.atlasv1\.[a-z0-9_=-]{60,70})(?:[^0-9A-Za-z_=-]|$)`, []string{"atlasv1"}, "iac"),
+		r("pulumi-access-token", "Pulumi access token", "high", tok(`pul-[a-f0-9]{40}`), []string{"pul-"}, "iac"),
+		r("doppler-token", "Doppler token", "high", `(?i)\b(dp\.(?:pt|st|sa|ct|scim)\.[a-z0-9]{40,44})`, []string{"dp."}, "secrets-manager"),
+		r("vault-token", "HashiCorp Vault service/batch token", "critical",
+			tok(`hv[sb]\.[\w-]{90,400}`), []string{"hvs.", "hvb."}, "vault", "secrets-manager"),
+		withEntropy(r("vault-token-legacy", "HashiCorp Vault token (legacy)", "high",
+			semi([]string{`vault_?token`, `vault`}, `s\.[A-Za-z0-9]{24}`, false), []string{"vault"}, "vault"), 3.5),
+		r("octopus-deploy-api-key", "Octopus Deploy API key", "high", tok(`API-[A-Z0-9]{26}`), []string{"api-"}, "ci"),
+
+		// --- Package registries / artifacts ------------------------------
+		r("npm-access-token", "npm access token", "critical", tok(`npm_[A-Za-z0-9]{36}`), []string{"npm_"}, "registry"),
+		r("npmrc-auth", "Credential in .npmrc / .yarnrc", "high",
+			`(?i)(?:^|\s|:)_(?:authToken|auth|password)\s*=\s*["']?([^\s"'$]{12,})`, []string{"_auth", "_password"}, "registry"),
+		r("pypi-upload-token", "PyPI upload token", "critical", tok(`pypi-AgEIcHlwaS5vcmc[\w-]{50,1000}`), []string{"pypi-ageichlwas5vcmc"}, "registry"),
+		r("nuget-api-key", "NuGet API key", "high", tok(`oy2[a-z0-9]{43}`), []string{"oy2"}, "registry"),
+		r("rubygems-api-key", "RubyGems API key", "high", tok(`rubygems_[a-f0-9]{48}`), []string{"rubygems_"}, "registry"),
+		r("docker-hub-pat", "Docker Hub personal access token", "high", tok(`dckr_pat_[A-Za-z0-9_-]{27}`), []string{"dckr_pat_"}, "registry"),
+		{ID: "docker-config-auth", Description: "Registry credential in Docker config.json", Severity: "high",
+			Regex: `"auth"\s*:\s*"([A-Za-z0-9+/]{16,}={0,2})"`, Keywords: []string{`"auth"`},
+			Path: `(?i)(?:^|/)(?:\.docker/config\.json|config\.json|\.dockercfg|dockerconfigjson)$`, Tags: []string{"registry"}},
+		r("jfrog-api-key", "JFrog Artifactory API key", "critical", tok(`AKCp[A-Za-z0-9]{69}`), []string{"akcp"}, "jfrog", "registry"),
+		r("jfrog-identity-token", "JFrog identity / reference token", "critical", tok(`cmVmd[A-Za-z0-9]{59}`), []string{"cmvmd"}, "jfrog", "registry"),
+		r("hex-api-key", "Hex.pm API key", "medium", semi([]string{`hex_?api_?key`}, `[a-f0-9]{32}`, false), []string{"hex"}, "registry"),
+
+		// --- AI providers / gateways --------------------------------------
+		r("openai-api-key", "OpenAI API key", "critical",
+			tok(`sk-(?:(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,200}|[A-Za-z0-9]{20})T3BlbkFJ[A-Za-z0-9_-]{20,200}`),
+			[]string{"t3blbkfj"}, "ai"),
+		r("anthropic-api-key", "Anthropic API key", "critical",
+			tok(`sk-ant-(?:api03|admin01)-[A-Za-z0-9_-]{80,100}AA`), []string{"sk-ant-"}, "ai"),
+		withEntropy(r("litellm-key", "LiteLLM master or virtual key", "critical",
+			semi([]string{`litellm(?:_?(?:master|api|virtual|proxy))?_?key`, `master_?key`}, `sk-[A-Za-z0-9_-]{16,128}`, false),
+			[]string{"litellm", "master"}, "ai", "gateway"), 3.0),
+		r("huggingface-token", "Hugging Face access token", "high",
+			tok(`(?:hf_|api_org_)[A-Za-z]{34}`), []string{"hf_", "api_org_"}, "ai"),
+		r("groq-api-key", "Groq API key", "high", tok(`gsk_[A-Za-z0-9]{52}`), []string{"gsk_"}, "ai"),
+		r("xai-api-key", "xAI API key", "high", tok(`xai-[A-Za-z0-9]{80}`), []string{"xai-"}, "ai"),
+		r("perplexity-api-key", "Perplexity API key", "high", tok(`pplx-[A-Za-z0-9]{48}`), []string{"pplx-"}, "ai"),
+		r("replicate-api-token", "Replicate API token", "high", tok(`r8_[A-Za-z0-9]{37}`), []string{"r8_"}, "ai"),
+		r("langsmith-api-key", "LangSmith / LangChain API key", "high",
+			tok(`lsv2_(?:pt|sk)_[a-f0-9]{32}_[a-f0-9]{10}`), []string{"lsv2_"}, "ai"),
+		withEntropy(r("cohere-api-key", "Cohere API key", "high",
+			semi([]string{`cohere(?:_?api)?_?key`, `co_?api_?key`}, `[A-Za-z0-9]{40}`, false), []string{"co"}, "ai"), 3.5),
+		withEntropy(r("mistral-api-key", "Mistral API key", "high",
+			semi([]string{`mistral(?:_?api)?_?key`}, `[A-Za-z0-9]{32}`, false), []string{"mistral"}, "ai"), 3.5),
+		withEntropy(r("deepseek-api-key", "DeepSeek API key", "high",
+			semi([]string{`deepseek(?:_?api)?_?key`}, `sk-[a-f0-9]{32}`, false), []string{"deepseek"}, "ai"), 3.0),
+		r("pinecone-api-key", "Pinecone API key", "high",
+			semi([]string{`pinecone(?:_?api)?_?key`}, `pcsk_[A-Za-z0-9_]{50,120}|`+uuid, false), []string{"pinecone"}, "ai"),
+
+		// --- Data / analytics / observability -----------------------------
+		r("databricks-token", "Databricks personal access token", "critical", tok(`dapi[a-f0-9]{32}(?:-\d)?`), []string{"dapi"}, "data"),
+		r("snowflake-credentials", "Snowflake password in connection URL", "high",
+			`(?i)snowflake://[^:/\s]+:([^@/\s]{6,})@`, []string{"snowflake://"}, "data"),
+		withEntropy(r("datadog-key", "Datadog API or application key", "high",
+			semi([]string{`datadog(?:_?(?:api|app(?:lication)?))?_?key`, `dd_?(?:api|app)_?key`}, `[a-f0-9]{32}|[a-f0-9]{40}`, false),
+			[]string{"datadog", "dd_"}, "observability"), 3.0),
+		r("grafana-cloud-api-token", "Grafana Cloud API token", "high", tok(`glc_[A-Za-z0-9+/]{32,400}={0,2}`), []string{"glc_"}, "observability"),
+		r("grafana-service-account-token", "Grafana service account token", "high",
+			tok(`glsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8}`), []string{"glsa_"}, "observability"),
+		r("grafana-api-key", "Grafana API key (legacy)", "high", tok(`eyJrIjoi[A-Za-z0-9]{70,400}={0,2}`), []string{"eyjrijoi"}, "observability"),
+		r("new-relic-key", "New Relic user/ingest key", "high",
+			`(?i)\b(NR(?:AK|II|JS)-[A-Z0-9_-]{27,32})(?:[^0-9A-Za-z_-]|$)`, []string{"nrak-", "nrii-", "nrjs-"}, "observability"),
+		r("sentry-token", "Sentry auth token", "high", tok(`sntry[su]_[A-Za-z0-9+/=_]{40,}`), []string{"sntrys_", "sntryu_"}, "observability"),
+		r("splunk-hec-token", "Splunk HTTP Event Collector token", "medium",
+			semi([]string{`splunk(?:_?hec)?_?token`, `hec_?token`}, uuid, false), []string{"splunk", "hec"}, "observability"),
+		r("pagerduty-token", "PagerDuty API token", "medium",
+			semi([]string{`pagerduty(?:_?api)?_?(?:token|key)`, `pd_?token`}, `[A-Za-z0-9_+-]{20}`, false), []string{"pagerduty", "pd_"}, "observability"),
+		r("honeycomb-api-key", "Honeycomb API key", "medium",
+			semi([]string{`honeycomb(?:_?api)?_?key`, `x-honeycomb-team`}, `hc[a-z]{2}_[a-z0-9]{58}|[A-Za-z0-9]{22,32}`, false), []string{"honeycomb"}, "observability"),
+
+		// --- Messaging / collaboration -----------------------------------
+		r("slack-bot-token", "Slack bot token", "high", tok(`xoxb-[0-9]{10,13}-[0-9]{10,13}[a-zA-Z0-9-]*`), []string{"xoxb-"}, "slack", "chat"),
+		r("slack-user-token", "Slack user token", "high",
+			tok(`xox[pe](?:-[0-9]{10,13}){3}-[a-zA-Z0-9-]{28,34}`), []string{"xoxp-", "xoxe-"}, "slack", "chat"),
+		r("slack-app-token", "Slack app-level token", "high", `(?i)\b(xapp-\d-[A-Z0-9]+-\d+-[a-z0-9]+)`, []string{"xapp-"}, "slack", "chat"),
+		r("slack-config-token", "Slack configuration or refresh token", "high",
+			tok(`xoxe\.xox[bp]-\d-[A-Z0-9]{163,166}|xoxe-\d-[A-Z0-9]{146}`), []string{"xoxe"}, "slack", "chat"),
+		r("slack-legacy-token", "Slack legacy token", "high", tok(`xox[os]-\d+-\d+-\d+-[a-fA-F\d]+`), []string{"xoxo-", "xoxs-"}, "slack", "chat"),
+		r("slack-webhook-url", "Slack webhook URL", "medium",
+			`((?:https?://)?hooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9+/]{43,56})`, []string{"hooks.slack.com"}, "slack", "webhook"),
+		r("discord-webhook-url", "Discord webhook URL", "medium",
+			`(https://(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/\d+/[\w-]{60,})`, []string{"discord"}, "webhook", "chat"),
+		r("discord-bot-token", "Discord bot token", "high",
+			semi([]string{`discord(?:_?bot)?_?token`}, `[MN][A-Za-z\d]{23,25}\.[\w-]{6}\.[\w-]{27,38}`, false), []string{"discord"}, "chat"),
+		r("telegram-bot-token", "Telegram bot token", "high", tok(`\d{8,10}:AA[0-9A-Za-z_-]{33}`), []string{":aa"}, "chat"),
+		withEntropy(r("twilio-api-key", "Twilio API key SID", "high", tok(`SK[0-9a-fA-F]{32}`), []string{"sk"}, "comms"), 3.0),
+		r("twilio-auth-token", "Twilio auth token", "high", semi([]string{`twilio(?:_?auth)?_?token`}, `[a-f0-9]{32}`, false), []string{"twilio"}, "comms"),
+		r("sendgrid-api-key", "SendGrid API key", "high", tok(`SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}`), []string{"sg."}, "comms"),
+		r("mailgun-api-key", "Mailgun API key", "high", semi([]string{`mailgun(?:_?api)?_?key`}, `(?:key-)?[a-f0-9]{32}|[a-f0-9]{32}-[a-f0-9]{8}-[a-f0-9]{8}`, false), []string{"mailgun"}, "comms"),
+		r("mailchimp-api-key", "Mailchimp API key", "high", tok(`[0-9a-f]{32}-us\d{1,2}`), []string{"-us"}, "comms"),
+		r("postmark-server-token", "Postmark server token", "medium", semi([]string{`postmark(?:_?(?:server|api))?_?token`}, uuid, false), []string{"postmark"}, "comms"),
+		r("linear-api-key", "Linear API key", "high", tok(`lin_api_[A-Za-z0-9]{40}`), []string{"lin_api_"}, "productivity"),
+		r("notion-token", "Notion integration token", "high", tok(`ntn_[0-9]{11}[A-Za-z0-9]{35}`), []string{"ntn_"}, "productivity"),
+		r("postman-api-key", "Postman API key", "high", `(?i)\b(PMAK-[a-f0-9]{24}-[a-f0-9]{34})(?:[^0-9A-Za-z_-]|$)`, []string{"pmak-"}, "productivity"),
+		r("okta-api-token", "Okta API token", "high", semi([]string{`okta(?:_?api)?_?token`, `okta`}, `00[\w=-]{40}`, false), []string{"okta"}, "identity"),
+
+		// --- Payments / commerce ------------------------------------------
+		r("stripe-key", "Stripe secret or restricted key", "critical", tok(`(?:sk|rk)_(?:test|live|prod)_[a-zA-Z0-9]{10,99}`), []string{"sk_", "rk_"}, "payments"),
+		r("stripe-webhook-secret", "Stripe webhook signing secret", "high", tok(`whsec_[a-zA-Z0-9]{32,}`), []string{"whsec_"}, "payments"),
+		r("square-token", "Square access token or OAuth secret", "high", tok(`(?:EAAA|sq0atp-|sq0csp-)[0-9A-Za-z_-]{22,60}`), []string{"eaaa", "sq0atp-", "sq0csp-"}, "payments"),
+		r("paypal-braintree-token", "PayPal Braintree access token", "critical",
+			tok(`access_token\$production\$[0-9a-z]{16}\$[0-9a-f]{32}`), []string{"access_token$production$"}, "payments"),
+		r("shopify-token", "Shopify access token / shared secret", "high", tok(`shp(?:at|ss|ca|pa)_[a-fA-F0-9]{32}`), []string{"shpat_", "shpss_", "shpca_", "shppa_"}, "commerce"),
+		r("facebook-access-token", "Facebook / Meta access token", "medium", tok(`EAA[MC][A-Za-z0-9]{100,}`), []string{"eaam", "eaac"}, "social"),
+		r("mapbox-secret-token", "Mapbox secret token", "high", tok(`sk\.eyJ[A-Za-z0-9_-]{50,}\.[A-Za-z0-9_-]{20,}`), []string{"sk.eyj"}, "maps"),
+		r("algolia-admin-key", "Algolia admin API key", "high", semi([]string{`algolia(?:_?admin)?(?:_?api)?_?key`}, `[a-f0-9]{32}`, false), []string{"algolia"}, "search"),
+
+		// --- Keys, certificates, tokens -----------------------------------
+		r("private-key", "Private key (PEM / PGP / OpenSSH)", "critical",
+			`(?i)(-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----[\s\S-]{64,}?-----END[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----)`,
+			[]string{"-----begin"}, "key"),
+		r("putty-private-key", "PuTTY private key", "critical", `(PuTTY-User-Key-File-[23]: [\w-]+)`, []string{"putty-user-key-file"}, "key"),
+		r("age-secret-key", "age encryption secret key", "critical",
+			`(AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58})`, []string{"age-secret-key-1"}, "key"),
+		r("kubeconfig-client-key", "Client private key embedded in kubeconfig", "critical",
+			`client-key-data:\s*["']?([A-Za-z0-9+/=]{40,})`, []string{"client-key-data"}, "kubernetes", "key"),
+		r("jwt", "JSON Web Token", "medium", tok(`eyJ[A-Za-z0-9_-]{15,}\.eyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{10,}={0,2}`), []string{"eyj"}, "token"),
+
+		// --- Credentials in URLs / connection strings ---------------------
+		{ID: "url-credentials", Description: "Password embedded in a URL (DB, broker, git, HTTP)", Severity: "high",
+			Regex:    `\b[a-zA-Z][a-zA-Z0-9+.-]{1,20}://[^:/?#@\s'"\x60]{1,64}:([^@/?#\s'"\x60]{3,128})@[a-zA-Z0-9.-]+`,
+			Keywords: []string{"://"}, Tags: []string{"credentials", "url"},
+			Allowlists: []Allowlist{
+				{Description: "placeholder passwords", Regexes: []string{`(?i)^(?:pass(?:word)?|passwd|pwd|secret|pw|test|admin|user(?:name)?|guest|root|xxx+|\*+|token|apikey|my%20pass)$`}},
+				{Description: "documentation hosts", RegexTarget: "match", Regexes: []string{`(?i)@(?:[\w-]+\.)*(?:example\.(?:com|org|net)|localhost|faketld|test|invalid|local)(?:[:/]|$)`}},
+			}},
+		r("jdbc-password", "Password in JDBC URL", "high",
+			`(?i)jdbc:[a-z0-9]+:[^\s"']*?[;?&]password=([^;&\s"']{4,})`, []string{"jdbc:"}, "credentials"),
+		r("connection-string-password", "Password in key=value connection string", "medium",
+			`(?i)(?:^|[;"'\s])(?:password|pwd)\s*=\s*([^;"'\s{}$]{4,})\s*;`, []string{"password", "pwd"}, "credentials"),
+
+		// --- File-name rules (no regex) ------------------------------------
+		{ID: "sensitive-file", Description: "File that usually holds credentials or keys", Severity: "medium",
+			Path: `(?i)(?:^|/)(?:id_(?:rsa|dsa|ecdsa|ed25519)|\.htpasswd|\.pgpass|\.git-credentials|\.netrc|_netrc|credentials\.(?:json|xml)|.*\.(?:p12|pfx|jks|keystore|kdbx|ovpn|tfstate|tfstate\.backup|ppk|asc\.key))$`,
+			Tags: []string{"file"}},
+
+		// --- Generic (lowest priority, yields to specific rules) ----------
+		{ID: "generic-api-key", Description: "Generic API key, token or secret", Severity: "medium", Entropy: 3.5,
+			Regex: semi([]string{`access`, `auth`, `(?-i:[Aa]pi|API)`, `credential`, `creds`, `key`, `passw(?:or)?d`, `secret`, `token`},
+				`[\w.=-]{10,150}|[a-z0-9][a-z0-9+/]{11,}={0,3}`, true),
+			Keywords: []string{"access", "api", "auth", "key", "credential", "creds", "passwd", "password", "secret", "token"},
+			Tags:     []string{"generic"},
+			Allowlists: []Allowlist{
+				{Description: "common non-secret words", Stopwords: genericStopwords},
+				{Description: "non-secret shapes", Regexes: []string{
+					`^[a-zA-Z_]+(?:\.[a-zA-Z_]+)+$`, // dotted identifiers
+					`^[a-z]+(?:[_-][a-z]+)+$`,       // snake/kebab words
+					`^[A-Z][A-Z0-9_]+$`,             // ENV_VAR_NAMES
+					`^(?:[a-z]+[A-Z][a-z]+)+$`,      // camelCase words
+					`^(?i:true|false|null|none|nil|undefined)$`,
+					`^[0-9.]+$`,
+					`^v?\d+\.\d+\.\d+(?:[-+][\w.-]+)?$`, // semver / Go pseudo-versions
+					`^\.[A-Za-z][\w.-]*$`,               // dotfile names
+					`(?i)^[\w-]+\.(?:json|ya?ml|toml|txt|md|go|py|js|ts|sh|env|ini|conf|cfg|xml|html|lock|log)$`, // file names
+				}},
+				{Description: "value read from env/secret store", RegexTarget: "line", Regexes: []string{
+					`(?i)(?:getenv|environ\[|process\.env|secretKeyRef|valueFrom|keyvault|\$\(\w+\)|\{\{\s*secrets\.)`,
+				}},
+			}},
+		{ID: "password-assignment", Description: "Hard-coded password literal", Severity: "low",
+			Regex:    `(?i)[\w.-]{0,30}?(?:passw(?:or)?d|pwd|passphrase)(?:[ \t\w.-]{0,10})[\s'"]{0,3}(?:=|:|:=|=>)\s*["']([^"'\s$<{%]{6,64})["']`,
+			Keywords: []string{"passw", "pwd", "passphrase"},
+			Tags:     []string{"generic", "credentials"},
+			Allowlists: []Allowlist{{Description: "placeholder values", Regexes: []string{
+				`(?i)^(?:password|passw0rd|pass|changeme|changeit|secret|example|sample|dummy|test(?:ing)?|default|null|none|undefined|required|optional|redacted|x{4,}|\*{4,}|\.{4,})\d*$`,
+				`(?i)^(?:enter|your|my|new|old|confirm)[_ -]?pass`,
+				`^[a-zA-Z][a-zA-Z0-9+.-]*://`, // URLs (url-credentials covers passwords in URLs)
+				`^[./~]`,                      // file paths
+			}}}},
+	}
+	return rules
+}
+
+var genericStopwords = []string{
+	"abcdef", "123456", "000000", "password", "passw0rd", "secret", "token", "apikey", "api_key", "bearer",
+	"changeit", "default", "localhost", "function", "return", "string", "public", "private", "config",
+	"variable", "example", "sample", "dummy", "placeholder", "test1234", "testtest", "hunter2", "lorem",
+	"foobar", "redacted", "masked", "notset", "unset", "required", "optional", "enabled", "disabled",
+	"keyword", "keyring", "keychain", "keystore", "keyvault", "keypair", "keyboard", "author", "accessor",
+	"authority", "authorize", "credential", "tokenizer", "_field", "_name", "_type", "_path", "_url", "_file",
+	"aaaaaa", "xxxxxx", "******",
+}
+
+// DefaultAllowlists are global allowlists shipped with the default pack.
+func DefaultAllowlists() []Allowlist {
+	return []Allowlist{
+		{Description: "binary, media and lock files", Paths: []string{
+			`(?i)\.(?:png|jpe?g|gif|bmp|ico|webp|tiff?|svg|woff2?|ttf|otf|eot|pdf|zip|gz|tgz|bz2|xz|7z|rar|jar|war|ear|class|exe|dll|so|dylib|a|o|bin|dat|mp[34]|mov|avi|wav|flac|ogg|pyc|whl|egg|wasm|DS_Store)$`,
+			`(?:^|/)(?:go\.sum|go\.work\.sum|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb|poetry\.lock|Pipfile\.lock|uv\.lock|Cargo\.lock|composer\.lock|Gemfile\.lock|gradle\.lockfile|packages\.lock\.json|MODULE\.bazel\.lock)$`,
+			`(?:^|/)(?:node_modules|\.git|\.venv|__pycache__|\.terraform/providers)/`,
+			`(?:^|/)(?:\.?secretscan\.toml|\.gitleaks\.toml|gitleaks\.toml|\.secretscanignore|\.gitleaksignore|\.secrets\.baseline)$`,
+		}},
+		{Description: "placeholders and templated values", Regexes: []string{
+			`^\$\{[^}]*\}$`, `^\$\([^)]*\)$`, `^\{\{.*\}\}$`, `^<[^>]+>$`, `^%[A-Za-z_]+%$`, `^\$[A-Z_][A-Z0-9_]*$`,
+			`^[*xX#•.]+$`,
+			`(?i)^(?:your|my|insert|replace|enter|put)[_-]`,
+			`(?i)(?:example|sample|dummy|placeholder|changeme|redacted|notreal|not_a_real|fake_?(?:key|token|secret))`,
+		}},
+	}
+}
+
+// Default returns the built-in config.
+func Default() *Config {
+	return &Config{Title: "secretscan default rules", Rules: DefaultRules(), Allowlists: DefaultAllowlists()}
+}
