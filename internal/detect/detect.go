@@ -61,6 +61,15 @@ type Finding struct {
 	// Remediation is filled in after detection (rotation, keyless
 	// alternative, replacement expression); see package remediate.
 	Remediation *remediate.Guidance `json:"Remediation,omitempty"`
+	// Confidence (high/medium/low) and the independent evidence behind it.
+	Confidence string   `json:"Confidence"`
+	Evidence   []string `json:"Evidence,omitempty"`
+	// Blocking is set by the policy: strict blocks every finding, balanced
+	// blocks high confidence and reports the rest for review.
+	Blocking bool `json:"Blocking"`
+	// Source and Triage are set when re-scoring another scanner's report.
+	Source string `json:"Source,omitempty"`
+	Triage string `json:"Triage,omitempty"`
 
 	sStart, sEnd int  // secret span in the fragment (for overlap checks)
 	generic      bool // produced by a generic rule
@@ -71,6 +80,8 @@ type Options struct {
 	MaxDecodeDepth int      // 0 disables base64/hex/percent decoding
 	IgnoreMarkers  []string // inline markers that suppress a finding on that line
 	NoNoiseFilters bool     // audit mode: disable heuristic false-positive filters
+	// RecordSuppressed keeps every filtered candidate (not just counts).
+	RecordSuppressed bool
 }
 
 // DefaultIgnoreMarkers are recognized inline suppressions from common tools.
@@ -135,49 +146,112 @@ type hit struct {
 	sStart, sEnd  int
 	match, secret string
 	entropy       float64
+	confidence    string
+	evidence      []string
 }
 
-// Detect scans one fragment.
-func (d *Detector) Detect(f Fragment) []Finding {
+// Detect scans one fragment and returns its findings.
+func (d *Detector) Detect(f Fragment) []Finding { return d.Scan(f).Findings }
+
+// Scan scans one fragment, returning findings and the suppression ledger.
+func (d *Detector) Scan(f Fragment) Result {
 	f.FilePath = filepath.ToSlash(f.FilePath)
 	if f.StartLine < 1 {
 		f.StartLine = 1
 	}
+	res := Result{Counts: map[string]int{}}
 	if d.SkipPath(f.FilePath) {
-		return nil
+		return res
+	}
+	type pending struct {
+		rule           *config.CompiledRule
+		pos            int
+		secret, reason string
+	}
+	var held []pending
+	suppress := func(rule *config.CompiledRule, pos int, secret, reason string) {
+		held = append(held, pending{rule, pos, secret, reason})
 	}
 	var out []Finding
 
 	// File-name rules.
 	for _, rule := range d.rs.Rules {
 		if rule.Re == nil && rule.PathRe != nil && rule.PathRe.MatchString(f.FilePath) {
-			fd := d.newFinding(rule, f, hit{rule: rule}, 0, 0, "")
-			if !d.allowed(rule, f, "", "", "") {
-				out = append(out, fd)
+			conf, ev := assess(rule, "", false, f.FilePath, 0)
+			fd := d.newFinding(rule, f, hit{rule: rule, confidence: conf, evidence: ev}, 0, 0, "")
+			if why := d.allowed(rule, f, "", "", ""); why != "" {
+				suppress(rule, 0, "", why)
+				continue
 			}
+			out = append(out, fd)
 		}
 	}
 
 	lower := asciiLower(f.Raw)
-	for _, h := range d.hits(f.Raw, lower, f.FilePath) {
+	hs, drops := d.hits(f.Raw, lower, f.FilePath)
+	for _, dr := range drops {
+		suppress(dr.rule, dr.sStart, dr.secret, dr.reason)
+	}
+	for _, h := range hs {
 		line := lineText(f.Raw, h.sStart)
-		if d.inlineIgnored(f.Raw, h.sStart, h.sEnd) || d.allowed(h.rule, f, h.secret, h.match, line) {
+		if d.inlineIgnored(f.Raw, h.sStart, h.sEnd) {
+			suppress(h.rule, h.sStart, h.secret, "inline-ignore")
+			continue
+		}
+		if why := d.allowed(h.rule, f, h.secret, h.match, line); why != "" {
+			suppress(h.rule, h.sStart, h.secret, why)
 			continue
 		}
 		out = append(out, d.newFinding(h.rule, f, h, h.sStart, h.sEnd, ""))
 	}
 
 	if d.opts.MaxDecodeDepth > 0 {
-		d.decodePass(f, f.Raw, 1, "", -1, -1, &out)
+		d.decodePass(f, f.Raw, 1, "", -1, -1, &out, suppress)
 	}
-	return dedupe(out)
+	res.Findings = dedupe(out)
+
+	// A candidate filtered by one rule but reported by another (e.g. the
+	// generic rule drops a value that password-assignment reports) is not a
+	// suppression: leave it out of the ledger.
+	reported := map[string]bool{}
+	for _, fd := range res.Findings {
+		reported[fd.Secret] = true
+	}
+	for _, p := range held {
+		if p.secret != "" && reported[p.secret] {
+			continue
+		}
+		covered := false
+		for sec := range reported {
+			if p.secret != "" && sec != "" && strings.Contains(sec, p.secret) {
+				covered = true
+				break
+			}
+		}
+		if covered {
+			continue
+		}
+		res.Counts[reasonKey(p.reason)]++
+		if !d.opts.RecordSuppressed {
+			continue
+		}
+		line := f.StartLine
+		if p.pos > 0 {
+			line, _ = position(f.Raw, p.pos, f.StartLine)
+		}
+		sum := sha256.Sum256([]byte(p.secret))
+		res.Suppressed = append(res.Suppressed, Suppressed{RuleID: p.rule.ID, File: f.FilePath, StartLine: line,
+			Commit: f.Commit, Reason: p.reason, Secret: p.secret, SecretHash: hex.EncodeToString(sum[:])})
+	}
+	return res
 }
 
 // hits runs every applicable rule. Rules with keywords only run their regex
 // over line windows around keyword occurrences, which keeps throughput high
 // with Go's linear-time (but DFA-less) regexp engine.
-func (d *Detector) hits(text, lower, path string) []hit {
+func (d *Detector) hits(text, lower, path string) ([]hit, []drop) {
 	var hs []hit
+	var drops []drop
 	occ := d.ac.find(lower) // all keyword occurrences in one pass
 	dropInBlobs(text, occ)
 	for ri, rule := range d.rs.Rules {
@@ -210,25 +284,42 @@ func (d *Detector) hits(text, lower, path string) []hit {
 				secret := sub[s:e]
 				quoted := s > 0 && isQuote(sub[s-1])
 				filters := !d.opts.NoNoiseFilters
-				if filters && rule.Generic && rule.Entropy > 0 && (looksLikeIdentifier(secret, quoted) || genericNoise(secret, quoted, path)) {
-					continue // code reference, words, path, UUID, kwargs...
+				dropIt := func(reason string) {
+					drops = append(drops, drop{rule: rule, sStart: w[0] + s, sEnd: w[0] + e, secret: secret, reason: reason})
 				}
 				ent := Shannon(secret)
 				if rule.Entropy > 0 && ent < entropyFloor(rule, secret) {
+					continue // never qualified: not a suppression
+				}
+				if filters && rule.Generic && rule.Entropy > 0 {
+					if looksLikeIdentifier(secret, quoted || envishPath.MatchString(path)) {
+						dropIt("identifier")
+						continue
+					}
+					if why := genericNoise(secret, quoted, path); why != "" {
+						dropIt(why)
+						continue
+					}
+				}
+				if filters && isKnownPublic(secret) {
+					dropIt("known-public-example")
 					continue
 				}
-				if filters && (isKnownPublic(secret) || (rule.Generic && isSequential(secret))) {
+				if filters && rule.Generic && isSequential(secret) {
+					dropIt("sequential-or-decoded-prose")
 					continue
 				}
 				if filters && rule.ID == "password-assignment" && weakPasswordNoise(secret) {
+					dropIt("placeholder-password")
 					continue
 				}
+				conf, ev := assess(rule, secret, quoted, path, ent)
 				hs = append(hs, hit{rule: rule, mStart: w[0] + m[0], mEnd: w[0] + m[1], sStart: w[0] + s, sEnd: w[0] + e,
-					match: strings.TrimSpace(sub[m[0]:m[1]]), secret: secret, entropy: ent})
+					match: strings.TrimSpace(sub[m[0]:m[1]]), secret: secret, entropy: ent, confidence: conf, evidence: ev})
 			}
 		}
 	}
-	return hs
+	return hs, drops
 }
 
 const multilineSpan = 16 << 10
@@ -332,33 +423,50 @@ var envishPath = regexp.MustCompile(`(?i)(?:^|/)(?:\.env(?:\.[\w-]+)?|[\w.-]*\.e
 const pwSymbols = "!@#%^&*+~?$"
 
 // genericNoise applies structural filters (after gitleaks, detect-secrets
-// and trufflehog) to values caught by entropy-gated generic rules.
-func genericNoise(secret string, quoted bool, path string) bool {
+// and trufflehog) to values caught by entropy-gated generic rules. It returns
+// the reason a value is noise, or "".
+func genericNoise(secret string, quoted bool, path string) string {
 	core := strings.TrimRight(secret, "=")
 	if strings.Contains(core, "=") {
-		return true // kwargs / config pairs: func=submit_row, Region=eu-west-1
+		return "key=value-pair" // kwargs / config pairs: func=submit_row, Region=eu-west-1
 	}
 	if isUUID(secret) {
-		return true // identifiers far more often than credentials
+		return "uuid" // identifiers far more often than credentials
 	}
-	if numLiteral.MatchString(secret) || dateLike.MatchString(secret) || strings.Contains(secret, "...") || segmentsAreWords(secret) {
-		return true // numbers, timestamps, truncated doc examples, oauth-2025-04-20
+	if numLiteral.MatchString(secret) || dateLike.MatchString(secret) {
+		return "number-or-date"
+	}
+	if strings.Contains(secret, "...") {
+		return "truncated-example"
+	}
+	if segmentsAreWords(secret) {
+		return "word-segments" // oauth-2025-04-20, v2-beta
 	}
 	hasDigit := strings.IndexFunc(secret, unicode.IsDigit) >= 0
 	if !hasDigit && isSingleCaseLetters(secret) {
-		return true // nextkeyfrompreviousresponse, SOMECONSTANT (gitleaks rejects all letter-only values)
+		return "single-case-letters" // nextkeyfrompreviousresponse, SOMECONSTANT
 	}
 	w := wordy.Wordiness(secret)
-	if w >= 0.6 {
-		return true // made of words: SecurityProfiles, key-2024-primary
+	// Identifier-shaped values (clean camelCase / snake_case) need less
+	// word evidence than arbitrary strings, whose mixed case and inner digits
+	// make chance word runs more likely.
+	clean := cleanIdentifier(secret)
+	if (clean && w >= 0.6) || (w >= 0.75 && digitFraction(secret) <= 0.2) {
+		return "word-like" // SecurityProfiles, accessTokenProvider
 	}
-	if !hasDigit && (strings.ContainsAny(secret, "./_-") || w >= 0.35) {
-		return true // digit-free dotted names and paths: esnext.map.group-by
+	if camelWords(secret) {
+		return "camel-case-identifier" // V1DownwardAPIProjection, IntegrationSummaries
+	}
+	if dottedNamespace(secret) {
+		return "dotted-namespace" // es6.symbol, core-js.es7.map
+	}
+	if !hasDigit && (strings.ContainsAny(secret, "./_-") || w >= 0.65 || (clean && w >= 0.5)) {
+		return "digit-free-name-or-path" // esnext.map.group-by
 	}
 	if strings.ContainsAny(secret, pwSymbols) && !quoted && !envishPath.MatchString(path) {
-		return true // operators in code: a*b+c; symbols only count in literals/env files
+		return "operator-in-code" // a*b+c; symbols only count in literals/env files
 	}
-	return false
+	return ""
 }
 
 func isKnownPublic(secret string) bool {
@@ -429,6 +537,7 @@ func segmentsAreWords(s string) bool {
 		}
 		switch {
 		case digits == len(p):
+		case digits+letters == len(p) && len(p) <= 4 && digits > 0: // es6, v2, utf8, KRB5
 		case letters == len(p) && (len(p) <= 3 || wordy.Score(p) > wordy.Threshold):
 		default:
 			return false
@@ -437,11 +546,73 @@ func segmentsAreWords(s string) bool {
 	return true
 }
 
+// camelWords reports type and field names: at least two capitalized,
+// word-like runs of 4+ letters (plus short acronyms) covering 80% of the
+// letters. Each run must also score as a word, so random mixed-case tokens
+// (which contain capital+lowercase runs by chance) are not matched.
+// camelSlack loosens the per-word threshold for longer capitalized words: the
+// capitalization structure is itself evidence of an identifier. Checked in
+// tests against 200k random tokens.
+const camelSlack = 0.25
+
+func camelWords(s string) bool {
+	letters := 0
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' {
+			letters++
+		}
+	}
+	words, covered := 0, 0
+	for _, w := range wordy.Tokens(s) {
+		upper := w[0] >= 'A' && w[0] <= 'Z'
+		rest := strings.ToLower(w[1:]) == w[1:]
+		allCaps := strings.ToUpper(w) == w
+		switch {
+		case upper && rest && len(w) >= 4 && (wordy.Score(w) > wordy.Threshold || len(w) >= 6 && wordy.Score(w) > wordy.Threshold-camelSlack):
+			words++
+			covered += len(w)
+		case allCaps && len(w) >= 2 && len(w) <= 4:
+			covered += len(w) // API, HTTP, ID
+		}
+	}
+	return letters > 0 && words >= 2 && float64(covered)/float64(letters) >= 0.85
+}
+
+// dottedNamespace matches lowercase module/feature paths (es6.symbol,
+// web.dom-collections.iterator) with at most one digit per segment.
+func dottedNamespace(s string) bool {
+	if !strings.Contains(s, ".") || strings.ToLower(s) != s {
+		return false
+	}
+	for _, seg := range strings.Split(s, ".") {
+		if seg == "" || seg[0] < 'a' || seg[0] > 'z' {
+			return false
+		}
+		digits := 0
+		for i := 0; i < len(seg); i++ {
+			c := seg[i]
+			switch {
+			case c >= '0' && c <= '9':
+				digits++
+			case c >= 'a' && c <= 'z', c == '-', c == '_':
+			default:
+				return false
+			}
+		}
+		if digits > 1 {
+			return false
+		}
+	}
+	return true
+}
+
+var envVarName = regexp.MustCompile(`^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$`)
+
 // weakPasswordNoise drops "passwords" that are really labels, error codes
 // or timestamps; leet-speak and mixed values (hunter2, s00pers3cret) stay.
 func weakPasswordNoise(v string) bool {
-	if dateLike.MatchString(v) || numLiteral.MatchString(v) || strings.Contains(v, "...") {
-		return true
+	if dateLike.MatchString(v) || numLiteral.MatchString(v) || strings.Contains(v, "...") || envVarName.MatchString(v) {
+		return true // timestamps, numbers, truncated examples, ENV_VAR_NAMES
 	}
 	hasDigit := strings.IndexFunc(v, unicode.IsDigit) >= 0
 	if !hasDigit && (strings.ContainsAny(v, "-_.") || wordy.Wordiness(v) >= 0.6) {
@@ -520,6 +691,48 @@ func charClasses(s string) int {
 	return n
 }
 
+// cleanIdentifier reports camelCase / PascalCase / snake_case / kebab-case
+// shapes: letters with digits only at the end of a segment, at most one
+// all-caps run (acronym) and at most one 1-2 letter word.
+func cleanIdentifier(s string) bool {
+	for _, seg := range strings.FieldsFunc(s, func(r rune) bool { return r == '_' || r == '-' || r == '.' }) {
+		trim := strings.TrimRight(seg, "0123456789")
+		if trim == "" || strings.ContainsAny(trim, "0123456789") {
+			return false
+		}
+		for i := 0; i < len(trim); i++ {
+			c := trim[i]
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
+				return false
+			}
+		}
+	}
+	caps, short := 0, 0
+	toks := wordy.Tokens(s)
+	for i, t := range toks {
+		if len(t) >= 2 && strings.ToUpper(t) == t {
+			caps++
+		}
+		if len(t) <= 2 && i > 0 {
+			short++
+		}
+	}
+	return len(toks) >= 2 && caps <= 1 && short <= 1
+}
+
+func digitFraction(s string) float64 {
+	if s == "" {
+		return 0
+	}
+	n := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] >= '0' && s[i] <= '9' {
+			n++
+		}
+	}
+	return float64(n) / float64(len(s))
+}
+
 func isQuote(c byte) bool { return c == '"' || c == '\'' || c == '`' }
 
 // looksLikeIdentifier reports whether s reads like a code identifier or a
@@ -588,6 +801,12 @@ func looksLikeIdentifier(s string, quoted bool) bool {
 		}
 	}
 	if quoted {
+		// For literals the split alone is not evidence: random mixed-case
+		// strings also split into 3+ letter runs, so most letters must form
+		// real words. (Unquoted values in code are references, not secrets.)
+		if wordy.Wordiness(s) < 0.6 {
+			return false
+		}
 		return short == 0 && len(words) >= 3
 	}
 	return short*3 <= len(words)
@@ -616,24 +835,34 @@ func secretSpan(rule *config.CompiledRule, m []int) (int, int) {
 	return m[0], m[1]
 }
 
-func (d *Detector) allowed(rule *config.CompiledRule, f Fragment, secret, match, line string) bool {
+// allowed returns "allowlist: <description>" when an allowlist suppresses
+// the candidate, else "". Global allowlists only apply to the rules they are
+// scoped to (targetRules / targetTags).
+func (d *Detector) allowed(rule *config.CompiledRule, f Fragment, secret, match, line string) string {
 	for _, a := range rule.Allowlists {
 		if a.Allowed(f.FilePath, f.Commit, secret, match, line) {
-			return true
+			return "allowlist: " + nonEmptyDesc(a.Description, rule.ID+" rule allowlist")
 		}
 	}
 	for _, a := range d.rs.Allowlists {
-		if len(a.TargetRules) > 0 && !a.TargetRules[rule.ID] {
+		if !a.AppliesTo(rule) {
 			continue
 		}
 		if secret == "" && len(a.Paths) == 0 && len(a.Commits) == 0 {
 			continue // secret-only allowlists don't apply to file-name findings
 		}
 		if a.Allowed(f.FilePath, f.Commit, secret, match, line) {
-			return true
+			return "allowlist: " + nonEmptyDesc(a.Description, "global allowlist")
 		}
 	}
-	return false
+	return ""
+}
+
+func nonEmptyDesc(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
 }
 
 // inlineIgnored checks the lines spanned by the secret (and the line before,
@@ -682,6 +911,13 @@ func (d *Detector) newFinding(rule *config.CompiledRule, f Fragment, h hit, s, e
 		File: f.FilePath, Match: h.match, Secret: h.secret, Entropy: round2(h.entropy), Decoded: decoded,
 		Commit: f.Commit, Author: f.Author, Email: f.Email, Date: f.Date, Message: f.Message,
 		sStart: s, sEnd: e, generic: rule.Generic,
+		Confidence: h.confidence, Evidence: h.evidence,
+	}
+	if fd.Confidence == "" {
+		fd.Confidence, fd.Evidence = assess(rule, h.secret, false, f.FilePath, h.entropy)
+	}
+	if decoded != "" {
+		fd.Evidence = append(append([]string(nil), fd.Evidence...), "found after decoding ("+decoded+")")
 	}
 	if rule.Re != nil {
 		fd.StartLine, fd.StartColumn = position(f.Raw, s, f.StartLine)
@@ -750,7 +986,8 @@ var ()
 
 const maxSegments = 2000
 
-func (d *Detector) decodePass(f Fragment, text string, depth int, chain string, os, oe int, out *[]Finding) {
+func (d *Detector) decodePass(f Fragment, text string, depth int, chain string, os, oe int, out *[]Finding,
+	suppress func(rule *config.CompiledRule, pos int, secret, reason string)) {
 	type seg struct {
 		s, e int
 		val  string
@@ -799,14 +1036,23 @@ func (d *Detector) decodePass(f Fragment, text string, depth int, chain string, 
 		}
 		lower := asciiLower(sg.val)
 		line := lineText(f.Raw, s)
-		for _, h := range d.hits(sg.val, lower, f.FilePath) {
-			if d.inlineIgnored(f.Raw, s, e) || d.allowed(h.rule, f, h.secret, h.match, line) {
+		hs, drops := d.hits(sg.val, lower, f.FilePath)
+		for _, dr := range drops {
+			suppress(dr.rule, s, dr.secret, dr.reason)
+		}
+		for _, h := range hs {
+			if d.inlineIgnored(f.Raw, s, e) {
+				suppress(h.rule, s, h.secret, "inline-ignore")
+				continue
+			}
+			if why := d.allowed(h.rule, f, h.secret, h.match, line); why != "" {
+				suppress(h.rule, s, h.secret, why)
 				continue
 			}
 			*out = append(*out, d.newFinding(h.rule, f, h, s, e, enc))
 		}
 		if depth < d.opts.MaxDecodeDepth {
-			d.decodePass(f, sg.val, depth+1, enc, s, e, out)
+			d.decodePass(f, sg.val, depth+1, enc, s, e, out, suppress)
 		}
 	}
 }

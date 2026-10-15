@@ -4,9 +4,30 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Go Reference](https://pkg.go.dev/badge/github.com/AISolutionLabs/secret-scanner.svg)](https://pkg.go.dev/github.com/AISolutionLabs/secret-scanner)
 
-A fast, dependency-free secret scanner for files, git history, staged changes,
-outgoing pushes and raw diffs. It runs as a single static Go binary, so it
-fits pre-commit/pre-push hooks, CI and git push proxies alike.
+**Catch real secrets. Ignore the noise. Keep every commit moving.**
+
+secretscan is a precision-first secret scanner. Alert fatigue is the real
+failure mode of secret scanning: when developers keep seeing harmless
+matches, they add broad exclusions or bypass the hook. secretscan keeps broad
+coverage, cuts unnecessary alerts, and refuses to buy that by quietly missing
+real secrets. Both directions are [measured](#benchmark) against gitleaks and
+detect-secrets on the same corpus.
+
+It scans files, git history, staged changes, outgoing pushes and raw diffs as
+a single dependency-free Go binary, and its [`triage`](#triage-a-precision-layer-for-other-scanners)
+command adds the same precision layer on top of gitleaks, trufflehog or any
+SARIF report.
+
+- **Evidence, not entropy**: provider formats are high confidence on their
+  own. Generic matches need several independent signals (credential-named
+  key, randomness, composition, literal, location) and get a confidence
+  level with the reasons. See [docs/precision.md](docs/precision.md).
+- **Strict or balanced**: strict blocks every finding (default). Balanced
+  blocks high confidence and lists the rest for review. The trade-off is
+  explicit, and a provider token is never downgraded because it sits in `tests/`.
+- **No silent passes**: every filtered candidate is counted and listable
+  with its reason (`--show-suppressed`). Suppressions are narrow, and
+  regression tests prove none of them hides a valid secret next to it.
 
 - **120+ built-in rules**: AWS (incl. Bedrock API keys), Azure (Entra ID secrets,
   storage keys, SAS, new and legacy Azure DevOps PATs), GCP, GitHub, GitLab,
@@ -15,11 +36,9 @@ fits pre-commit/pre-push hooks, CI and git push proxies alike.
 - **Custom patterns**: via TOML config, `--pattern` flags or a patterns file.
 - **Drop-in gitleaks compatibility**: config schema, fingerprints, `.gitleaksignore`,
   `gitleaks:allow` and JSON report shape all carry over.
-- **Low noise, high recall**: on the [benchmark](#benchmark) it finds more
-  secrets than gitleaks or detect-secrets with equal or less noise. A
-  character-level language model and structural filters reject identifiers,
-  words, paths, hashes, UUIDs and published sample credentials. See
-  [How noise is filtered](#how-noise-is-filtered).
+- **Noise filters with named reasons**: a character-level language model and
+  structural checks reject identifiers, words, paths, digests, UUIDs and
+  published sample credentials. See [How noise is filtered](#how-noise-is-filtered).
 - **Finds hidden secrets**: recursively decodes base64, hex and percent-encoding.
 - **Safe output**: secrets are redacted by default (80% masked); reports
   carry a SHA-256 of each secret so baselines work without storing secrets.
@@ -57,9 +76,46 @@ git diff | secretscan stdin --diff     # scan only added lines of a diff
 cat file | secretscan stdin --label file.env
 
 secretscan install-hook --type both    # pre-commit + pre-push hooks
+secretscan triage gitleaks.json        # re-score another scanner's report
 ```
 
 Exit codes: `0` clean · `1` secrets found (`--exit-code N` to change) · `2` usage or config error.
+
+## Policies, confidence and the suppression ledger
+
+```
+[CRITICAL·high] github-pat GitHub personal access token  tests/test_gh.py:1:7     <- blocks under both policies
+── Needs review (not blocking under the balanced policy) ──
+[MEDIUM·medium] generic-api-key Generic API key, token or secret  tests/test_cfg.py:2:18
+    why:     assigned to a credential-named key; mixed character classes or long value; literal value
+             in code or config; in a test/example path (no downgrade for provider formats)
+secretscan: 2 secrets found (1 critical, 1 medium) · scanned 3 files (490 B) in 1ms
+  policy balanced: 1 blocking, 1 to review · 3 candidates filtered as noise (2 word-like, 1 uuid; --show-suppressed to list)
+```
+
+- `--policy strict|balanced`, or `policy = "balanced"` in `.secretscan.toml`,
+  or `secretscan install-hook --policy balanced`.
+- Every finding has `Confidence` (high/medium/low), `Evidence` and `Blocking`
+  in JSON. SARIF levels follow the policy (blocking = `error`).
+- `--min-confidence medium` hides weaker findings (still counted in the summary).
+- `--show-suppressed` lists every candidate a filter or allowlist removed:
+  file, line, rule, reason and redacted value.
+
+## Triage: a precision layer for other scanners
+
+Keep your existing scanner's rules and cut its noise:
+
+```sh
+gitleaks dir . -f json -r gitleaks.json
+secretscan triage gitleaks.json --policy balanced      # also trufflehog JSON lines or any SARIF
+```
+
+Each finding comes back as `verified`, `confirmed` (secretscan independently
+finds it), `uncorroborated` (kept for review) or `filtered: <reason>` (for
+example `digest-or-commit-hash`, `word-like`, `identifier`). Filtered findings
+are listed, never dropped. Values with a provider-specific shape are never
+filtered by word heuristics, and redacted or unreadable findings are kept.
+Exit codes follow the policy.
 
 ## Git hooks
 
@@ -225,6 +281,9 @@ disables the heuristic filters below. Both are useful for audits.
     --remediation MODE       short | full | none (text output guidance)
     --secret-store STORE     env | vault | aws | azure | gcp
     --fix / --fix-patch FILE replace hard-coded literals with env lookups
+    --policy P               strict (default) | balanced: only high confidence blocks
+    --min-confidence C       hide findings below low | medium | high (counted)
+    --show-suppressed        list candidates removed by filters/allowlists, with reasons
     --no-color, -q/--quiet, --no-inline-ignore, --no-noise-filters
 dir:   --follow-symlinks
 git:   --staged | --pre-push [--remote NAME] | --log-opts "ARGS"
@@ -267,43 +326,63 @@ and system CA settings are honored.
 
 ## Benchmark
 
-`bench/` compares secretscan with gitleaks (v8, built from source July 2026) and
-detect-secrets 1.5.0, with default settings for every tool:
+`bench/precision.py` runs every tool with default settings on the same data:
+gitleaks (v8, built from source, July 2026), detect-secrets 1.5.0, and
+gitleaks re-scored by `secretscan triage`. Methodology and caveats are in
+[docs/precision.md](docs/precision.md#how-it-is-measured).
 
-- **Labeled sets:** generated secrets at known lines inside realistic files,
-  including hard negatives such as commit SHAs, digests, UUIDs, `${VAR}`
-  templates and AWS doc keys. The *tuning* set has 329 secrets in 10 formats.
-  The *held-out* set has 160 secrets in 12 other formats (Java, C#, Kotlin,
-  web.config, .properties, INI, Helm, GitHub Actions, ...) and was never used
-  for tuning.
-- **Real-world corpora:** popular packages that shouldn't contain live
-  secrets, so every finding is noise or a published example credential.
-  These are 28 npm/PyPI packages (700 MB) plus the Go standard library for
-  tuning, and 24 different packages (200 MB) held out.
+- **Labeled secrets (529):** 329 tuning, 160 held-out (formats and file types
+  never tuned on) and 40 *safety* cases, i.e. secrets placed where suppressions
+  are risky: lockfiles, scanner configs, test dirs, next to digests, UUIDs and
+  AWS doc keys, and tokens containing placeholder words.
+- **Issue-derived negatives (91):** false positives quoted in public
+  gitleaks/trufflehog issues, plus randomized variants of each class.
+- **Package corpora (44k files):** 52 popular npm/PyPI packages where no
+  live secret is expected.
+- **Latency:** staged-changes scan over 60 synthetic commits.
 
-| Held-out (never tuned on) | Recall | Precision | npm findings | PyPI findings | Time (npm + PyPI) |
-|---|---|---|---|---|---|
-| **secretscan** | **100%** (96.9% before held-out fixes) | 100% | 6 | 29 | **8 s** |
-| gitleaks | 85.0% | 100% | 5 | 30 | 106 s |
-| detect-secrets | 73.8% | 76.6% | 616 | 37 | 746 s |
-
-| Tuning set | Recall | Precision | npm | PyPI | Go stdlib | Time (all three corpora) |
+| Tool | Recall | Recall that blocks¹ | Safety set | Precision | Issue FPs | Findings per 1k package files (reported / blocking¹) |
 |---|---|---|---|---|---|---|
-| secretscan v1 (before this work)¹ | 96.0% | 84.5% | 628 | 1009 | 80 | 53 s |
-| **secretscan** | **100%** | **100%** | **4** | **60** | **74** | **51 s** |
-| gitleaks | 82.4% | 91.9% | 35 | 239 | 82 | 416 s |
-| detect-secrets (labeled set only) | 73.6% | 53.1% | – | – | – | – |
+| **secretscan** | **100%** (529/529) | 99.8% | **40/40** | 100% | **0/91** | 4.04 / 1.72 |
+| gitleaks | 82.2% | 82.2% | 28/40 | 99.1% | 16/91 | 6.98 / 6.98 |
+| **gitleaks + `secretscan triage`** | 82.2% (no true finding lost) | 82.2% | 28/40 | 100% | **0/91** | **1.58 / 0.99** |
+| detect-secrets | 73.3% | 73.3% | 28/40 | 59.7% | 23/91 | – |
 
-¹ v1 timed with the windowing fixes from this round; as originally shipped it needed over 10 minutes on the npm corpus because of minified files.
+| Staged-commit latency (2 vCPUs) | p50 | p95 |
+|---|---|---|
+| **secretscan** | **38 ms** | **49 ms** |
+| gitleaks | 82 ms | 103 ms |
 
-What's left on the real-world corpora is mostly genuine-looking example
-credentials: AWS documentation JSON, test fixtures with random keys, and
-private keys or ECDH test vectors in Go's crypto tests. A secret scanner should
-report these. gitleaks misses credentials in URLs and connection strings, Azure
-SAS tokens, legacy Azure DevOps PATs and Datadog/Sentry keys. detect-secrets'
-entropy plugins flag hex and base64 blobs everywhere. Times are on 2 vCPUs.
+¹ secretscan and triage under the `balanced` policy. Under `strict` (the
+default), everything reported blocks.
 
-Reproduce with `bench/fetch-corpus.sh && python3 bench/run.py && HOLDOUT=1 python3 bench/run.py`.
+Reading the results:
+
+- **secretscan finds more and reports zero issue-derived false positives.**
+  It is the only tool that finds all 40 safety cases. gitleaks and
+  detect-secrets skip lockfiles and scanner configs, and miss tokens that
+  contain placeholder words.
+- **On package code, gitleaks + triage is quieter than secretscan alone**,
+  because gitleaks has fewer rules: it misses 94 of the labeled secrets
+  (credentials in URLs and connection strings, Azure SAS, legacy Azure DevOps
+  PATs, Datadog/Sentry keys and more). Most of what secretscan alone reports
+  there is review-level; what blocks is chiefly private keys and real-looking
+  tokens in test suites, which are reported on purpose (provider formats are
+  never downgraded by location).
+- **Triage keeps every true gitleaks finding** (435 before and after) while
+  removing all issue-derived false positives and 77% of gitleaks' package
+  noise. It is a drop-in precision layer for teams that keep gitleaks.
+- **Recall safety of the noise filters is tested directly:** across 200,000
+  random secrets the filters remove fewer than 0.01%
+  (`TestNoiseFiltersSpareRandomSecrets`).
+
+Caveats: labeled secrets are generated, not real credentials; the issue set
+covers cases whose text the issues quote; trufflehog was not run (it needs a
+newer Go toolchain and network-fetched modules here), though `triage` reads
+its JSON output.
+
+Reproduce: `bench/fetch-corpus.sh && python3 bench/precision.py`
+(`HOLDOUT=1 python3 bench/run.py` repeats the earlier held-out comparison).
 
 ## How noise is filtered
 

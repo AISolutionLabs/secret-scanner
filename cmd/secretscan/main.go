@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -27,6 +28,7 @@ import (
 	"github.com/AISolutionLabs/secret-scanner/internal/remediate"
 	"github.com/AISolutionLabs/secret-scanner/internal/report"
 	"github.com/AISolutionLabs/secret-scanner/internal/sources"
+	"github.com/AISolutionLabs/secret-scanner/internal/triage"
 	"github.com/AISolutionLabs/secret-scanner/internal/verify"
 )
 
@@ -47,6 +49,7 @@ Usage:
         --log-opts "<args>"      extra git log args, e.g. "--since=1.week main"
   secretscan stdin              scan stdin (--diff to parse a unified diff)
   secretscan explain <rule-id>  how to rotate, avoid and load a secret (--lang, --store)
+  secretscan triage <report>    re-score a gitleaks / trufflehog / SARIF report (precision layer)
   secretscan rules              list active rules
   secretscan validate           check config, regexes and rule self-tests
   secretscan install-hook       install git hooks (--type pre-commit|pre-push|both)
@@ -79,6 +82,8 @@ func main() {
 		code = runRules(args)
 	case "explain":
 		code = runExplain(args)
+	case "triage":
+		code = runTriage(args)
 	case "validate":
 		code = runValidate(args)
 	case "install-hook", "install-hooks":
@@ -148,6 +153,9 @@ type common struct {
 	redact        int
 	exitCode      int
 	minSeverity   string
+	policy        string
+	minConfidence string
+	showSupp      bool
 	maxMB         float64
 	decodeDepth   int
 	threads       int
@@ -198,6 +206,9 @@ func bindCommon(fs *flag.FlagSet, c *common, mode string) {
 	fs.Var(redactFlag{&c.redact}, "redact", "mask secrets in output: --redact (100%), --redact=N (percent hidden), --redact=0 to show (default 80)")
 	fs.IntVar(&c.exitCode, "exit-code", 1, "exit code when secrets are found")
 	fs.StringVar(&c.minSeverity, "min-severity", "low", "report and fail only at/above: info|low|medium|high|critical")
+	fs.StringVar(&c.policy, "policy", "", "strict (every finding blocks; default) | balanced (only high-confidence findings block, the rest are listed for review)")
+	fs.StringVar(&c.minConfidence, "min-confidence", "low", "hide findings below this confidence: low|medium|high (hidden findings are still counted)")
+	fs.BoolVar(&c.showSupp, "show-suppressed", false, "list every candidate removed by a filter or allowlist, with the reason")
 	fs.Float64Var(&c.maxMB, "max-target-megabytes", 10, "skip files (or diff additions per file) larger than this; 0 = no limit")
 	fs.IntVar(&c.decodeDepth, "max-decode-depth", 2, "recursively decode base64/hex/percent-encoded data this many levels; 0 = off")
 	fs.IntVar(&c.threads, "threads", runtime.NumCPU(), "worker goroutines")
@@ -326,6 +337,8 @@ func runScan(ctx context.Context, mode string, args []string) int {
 	var (
 		mu       sync.Mutex
 		findings []detect.Finding
+		supCount = map[string]int{}
+		supItems []detect.Suppressed
 		nFrags   int
 		nBytes   int64
 		commits  = map[string]bool{}
@@ -337,8 +350,13 @@ func runScan(ctx context.Context, mode string, args []string) int {
 		go func() {
 			defer wg.Done()
 			for f := range frags {
-				out := det.Detect(f)
+				res := det.Scan(f)
+				out := res.Findings
 				mu.Lock()
+				for k, v := range res.Counts {
+					supCount[k] += v
+				}
+				supItems = append(supItems, res.Suppressed...)
 				nFrags++
 				nBytes += int64(len(f.Raw))
 				if f.Commit != "" {
@@ -398,6 +416,16 @@ func runScan(ctx context.Context, mode string, args []string) int {
 	}
 	if c.verify && len(kept) > 0 {
 		verify.New().Run(ctx, kept, 8)
+		for i := range kept {
+			switch kept[i].Verification {
+			case verify.Verified: // proof beats every heuristic
+				kept[i].Confidence = detect.High
+				kept[i].Evidence = append(kept[i].Evidence, "verified live by the provider")
+			case verify.Invalid:
+				kept[i].Confidence = detect.Low
+				kept[i].Evidence = append(kept[i].Evidence, "rejected by the provider (revoked or invalid)")
+			}
+		}
 		if c.onlyVerified {
 			var v []detect.Finding
 			for _, f := range kept {
@@ -408,6 +436,27 @@ func runScan(ctx context.Context, mode string, args []string) int {
 			kept = v
 		}
 	}
+	// Confidence filter (hidden findings are counted, never silently dropped)
+	// and policy: which findings block the commit / build.
+	policy := c.policy
+	if policy == "" {
+		policy = rs.Policy
+	}
+	if policy == "" {
+		policy = "strict"
+	}
+	hidden := 0
+	minConf := detect.ConfidenceRank(c.minConfidence)
+	shown := kept[:0]
+	for _, f := range kept {
+		if detect.ConfidenceRank(f.Confidence) < minConf {
+			hidden++
+			continue
+		}
+		f.Blocking = policy == "strict" || f.Confidence == detect.High
+		shown = append(shown, f)
+	}
+	kept = shown
 	// Fix guidance needs the raw secret and line, so it runs before redaction.
 	store := c.secretStore
 	if store == "" {
@@ -445,6 +494,9 @@ func runScan(ctx context.Context, mode string, args []string) int {
 		a, b := kept[i], kept[j]
 		if (a.Verification == verify.Verified) != (b.Verification == verify.Verified) {
 			return a.Verification == verify.Verified // live secrets first
+		}
+		if a.Blocking != b.Blocking {
+			return a.Blocking // blocking before review
 		}
 		if a.File != b.File {
 			return a.File < b.File
@@ -485,7 +537,7 @@ func runScan(ctx context.Context, mode string, args []string) int {
 			fmt.Fprintf(os.Stderr, "secretscan: %v\n", err)
 			return exitError
 		}
-		werr := report.Write(out, format, kept, rs.Rules, version, report.Options{Remediation: c.remediation})
+		werr := report.Write(out, format, kept, rs.Rules, version, report.Options{Remediation: c.remediation, Policy: policy})
 		if cerr := out.Close(); werr == nil {
 			werr = cerr
 		}
@@ -494,10 +546,10 @@ func runScan(ctx context.Context, mode string, args []string) int {
 			return exitError
 		}
 		if !c.quiet && format != "text" {
-			_ = report.Text(os.Stdout, kept, report.Options{Color: color, Remediation: c.remediation})
+			_ = report.Text(os.Stdout, kept, report.Options{Color: color, Remediation: c.remediation, Policy: policy})
 		}
 	} else if !c.quiet || format != "text" {
-		if err := report.Write(os.Stdout, format, kept, rs.Rules, version, report.Options{Color: color, Remediation: c.remediation}); err != nil {
+		if err := report.Write(os.Stdout, format, kept, rs.Rules, version, report.Options{Color: color, Remediation: c.remediation, Policy: policy}); err != nil {
 			fmt.Fprintf(os.Stderr, "secretscan: %v\n", err)
 			return exitError
 		}
@@ -512,11 +564,23 @@ func runScan(ctx context.Context, mode string, args []string) int {
 	case mode == "git":
 		scope = fmt.Sprintf("%d commits", len(commits))
 	}
+	blocking := 0
+	for _, f := range kept {
+		if f.Blocking {
+			blocking++
+		}
+	}
 	fmt.Fprintf(os.Stderr, "secretscan: %s · scanned %s (%s) in %s\n",
 		report.Summary(kept), scope, humanBytes(nBytes), time.Since(start).Round(time.Millisecond))
+	if line := report.PolicyLine(kept, policy, hidden, supCount); line != "" {
+		fmt.Fprintln(os.Stderr, line)
+	}
+	if c.showSupp {
+		writeSuppressed(os.Stderr, supItems, c.redact)
+	}
 
 	fmt.Fprint(os.Stderr, fixSummary)
-	if len(kept) > 0 {
+	if blocking > 0 {
 		if c.staged || c.prePush {
 			fmt.Fprint(os.Stderr, `
   Blocked. To fix:
@@ -530,6 +594,39 @@ func runScan(ctx context.Context, mode string, args []string) int {
 		return c.exitCode
 	}
 	return exitOK
+}
+
+// writeSuppressed lists the ledger: every candidate a filter or allowlist
+// removed, so a missing finding can always be explained.
+func writeSuppressed(w io.Writer, items []detect.Suppressed, redactPct int) {
+	if len(items) == 0 {
+		fmt.Fprintln(w, "secretscan: no candidates were suppressed")
+		return
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].File != items[j].File {
+			return items[i].File < items[j].File
+		}
+		return items[i].StartLine < items[j].StartLine
+	})
+	fmt.Fprintf(w, "secretscan: %d suppressed candidate(s):\n", len(items))
+	for _, it := range items {
+		f := detect.Finding{Secret: it.Secret}
+		detect.Redact(&f, redactPct)
+		loc := fmt.Sprintf("%s:%d", it.File, it.StartLine)
+		if it.Commit != "" {
+			loc = it.Commit[:min(10, len(it.Commit))] + ":" + loc
+		}
+		fmt.Fprintf(w, "  %-40s %-24s %-28s %s\n", loc, it.RuleID, it.Reason, oneLineSecret(f.Secret))
+	}
+}
+
+func oneLineSecret(s string) string {
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	if len(s) > 60 {
+		s = s[:60] + "…"
+	}
+	return s
 }
 
 func buildDetector(c common, searchDirs []string) (*detect.Detector, *config.Ruleset, int) {
@@ -554,7 +651,19 @@ func buildDetector(c common, searchDirs []string) (*detect.Detector, *config.Rul
 		fmt.Fprintf(os.Stderr, "secretscan: unknown --min-severity %q\n", c.minSeverity)
 		return nil, nil, exitError
 	}
-	dopts := detect.Options{MaxDecodeDepth: c.decodeDepth, NoNoiseFilters: c.noFilters}
+	dopts := detect.Options{MaxDecodeDepth: c.decodeDepth, NoNoiseFilters: c.noFilters, RecordSuppressed: c.showSupp}
+	switch c.policy {
+	case "", "strict", "balanced":
+	default:
+		fmt.Fprintf(os.Stderr, "secretscan: unknown --policy %q (want strict or balanced)\n", c.policy)
+		return nil, nil, exitError
+	}
+	switch c.minConfidence {
+	case "", "low", "medium", "high":
+	default:
+		fmt.Fprintf(os.Stderr, "secretscan: unknown --min-confidence %q (want low, medium or high)\n", c.minConfidence)
+		return nil, nil, exitError
+	}
 	if c.noInline {
 		dopts.IgnoreMarkers = []string{}
 	}
@@ -695,7 +804,11 @@ func ruleFires(det *detect.Detector, id, text, path string) bool {
 
 const hookMarker = "# managed-by: secretscan"
 
-func hookScript(kind, bin string) string {
+func hookScript(kind, bin, policy string) string {
+	pflag := ""
+	if policy != "" {
+		pflag = " --policy " + policy
+	}
 	locate := fmt.Sprintf(`DEFAULT_BIN=%s
 SECRETSCAN_BIN="${SECRETSCAN_BIN:-$DEFAULT_BIN}"
 [ -x "$SECRETSCAN_BIN" ] || SECRETSCAN_BIN="$(command -v secretscan 2>/dev/null)"
@@ -713,14 +826,14 @@ fi
 	case "pre-push":
 		return "#!/bin/sh\n" + hookMarker + "\n" + locate + `refs="$(cat)"
 if [ -z "$SKIP_SCAN" ]; then
-  printf '%s\n' "$refs" | "$SECRETSCAN_BIN" git --pre-push --remote "$1" || exit $?
+  printf '%s\n' "$refs" | "$SECRETSCAN_BIN" git --pre-push --remote "$1"` + pflag + ` || exit $?
 fi
 if [ -x "$0.local" ]; then printf '%s\n' "$refs" | "$0.local" "$@"; exit $?; fi
 exit 0
 `
 	default:
 		return "#!/bin/sh\n" + hookMarker + "\n" + locate + `if [ -z "$SKIP_SCAN" ]; then
-  "$SECRETSCAN_BIN" git --staged || exit $?
+  "$SECRETSCAN_BIN" git --staged` + pflag + ` || exit $?
 fi
 if [ -x "$0.local" ]; then exec "$0.local" "$@"; fi
 exit 0
@@ -733,6 +846,7 @@ func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''
 func runInstallHook(args []string) int {
 	fs := flag.NewFlagSet("secretscan install-hook", flag.ContinueOnError)
 	kind := fs.String("type", "pre-commit", "pre-commit | pre-push | both")
+	hookPolicy := fs.String("policy", "", "strict | balanced (default: from config, else strict)")
 	repo := fs.String("repo", ".", "repository")
 	pos, err := parseInterleaved(fs, args)
 	if err != nil {
@@ -740,6 +854,10 @@ func runInstallHook(args []string) int {
 	}
 	if len(pos) > 0 {
 		*repo = pos[0]
+	}
+	if *hookPolicy != "" && *hookPolicy != "strict" && *hookPolicy != "balanced" {
+		fmt.Fprintf(os.Stderr, "secretscan: unknown --policy %q (want strict or balanced)\n", *hookPolicy)
+		return exitError
 	}
 	out, err := exec.Command("git", "-C", *repo, "rev-parse", "--git-path", "hooks").Output()
 	if err != nil {
@@ -772,7 +890,7 @@ func runInstallHook(args []string) int {
 			}
 			fmt.Printf("existing %s hook kept as %s.local and chained after the scan\n", k, k)
 		}
-		if err := os.WriteFile(path, []byte(hookScript(k, bin)), 0o755); err != nil {
+		if err := os.WriteFile(path, []byte(hookScript(k, bin, *hookPolicy)), 0o755); err != nil {
 			fmt.Fprintf(os.Stderr, "secretscan: %v\n", err)
 			return exitError
 		}
@@ -910,6 +1028,124 @@ func runExplain(args []string) int {
 			}
 			fmt.Printf("\n--- %s (%s) ---\n%s", l, label, snip)
 		}
+	}
+	return exitOK
+}
+
+// runTriage re-scores another scanner's findings with secretscan's context
+// analysis. Filtered findings are listed with their reason, never dropped.
+func runTriage(args []string) int {
+	fs := flag.NewFlagSet("secretscan triage", flag.ContinueOnError)
+	var c common
+	bindCommon(fs, &c, "triage")
+	root := fs.String("root", ".", "directory (or git repository) the report's paths are relative to")
+	pos, err := parseInterleaved(fs, args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return exitOK
+		}
+		return exitError
+	}
+	if len(pos) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: secretscan triage <gitleaks.json | trufflehog.jsonl | report.sarif | -> [--root DIR] [--policy balanced]")
+		return exitError
+	}
+	var data []byte
+	if pos[0] == "-" {
+		data, err = io.ReadAll(os.Stdin)
+	} else {
+		data, err = os.ReadFile(pos[0])
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "secretscan: %v\n", err)
+		return exitError
+	}
+	kind, inputs, err := triage.Parse(data)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "secretscan: %v\n", err)
+		return exitError
+	}
+	c.showSupp = true // the triager needs the suppression ledger
+	det, rs, code := buildDetector(c, []string{*root})
+	if det == nil {
+		return code
+	}
+	policy := c.policy
+	if policy == "" {
+		policy = rs.Policy
+	}
+	if policy == "" {
+		policy = "strict"
+	}
+	tr := triage.New(det, *root)
+	var kept, filtered []detect.Finding
+	counts := map[string]int{}
+	for _, in := range inputs {
+		f := tr.Evaluate(in)
+		status := f.Triage
+		if i := strings.Index(status, ":"); i > 0 {
+			status = status[:i]
+		}
+		counts[status]++
+		if status == triage.Filtered {
+			filtered = append(filtered, f)
+			continue
+		}
+		f.Blocking = policy == "strict" || f.Confidence == detect.High
+		kept = append(kept, f)
+	}
+	sort.SliceStable(kept, func(i, j int) bool { return kept[i].Blocking && !kept[j].Blocking })
+	all := append(append([]detect.Finding{}, kept...), filtered...)
+	for i := range all {
+		detect.Redact(&all[i], c.redact)
+	}
+	kept, filtered = all[:len(kept)], all[len(kept):]
+
+	format := strings.ToLower(c.format)
+	color := !c.noColor && os.Getenv("NO_COLOR") == "" && isTerminal(os.Stdout)
+	out := io.Writer(os.Stdout)
+	if c.reportPath != "" {
+		fh, err := os.OpenFile(c.reportPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "secretscan: %v\n", err)
+			return exitError
+		}
+		defer fh.Close()
+		out, color = fh, false
+		if format == "" {
+			format = strings.TrimPrefix(strings.ToLower(filepath.Ext(c.reportPath)), ".")
+		}
+	}
+	switch format {
+	case "", "text":
+		if !c.quiet {
+			_ = report.Text(out, kept, report.Options{Color: color, Remediation: "none", Policy: policy})
+			if len(filtered) > 0 {
+				fmt.Fprintf(out, "── Filtered as noise (%d; not blocking) ──\n", len(filtered))
+				for _, f := range filtered {
+					fmt.Fprintf(out, "  %s:%d  %s  %s  %s\n", f.File, f.StartLine, f.RuleID, strings.TrimPrefix(f.Triage, "filtered: "), oneLineSecret(f.Secret))
+				}
+			}
+		}
+	case "json", "sarif":
+		if err := report.Write(out, format, all, rs.Rules, version, report.Options{Policy: policy}); err != nil {
+			fmt.Fprintf(os.Stderr, "secretscan: %v\n", err)
+			return exitError
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "secretscan: triage supports text, json and sarif output\n")
+		return exitError
+	}
+	blocking := 0
+	for _, f := range kept {
+		if f.Blocking {
+			blocking++
+		}
+	}
+	fmt.Fprintf(os.Stderr, "secretscan triage (%s, %d findings): %d confirmed, %d verified, %d uncorroborated, %d filtered as noise · policy %s: %d blocking\n",
+		kind, len(inputs), counts[triage.Confirmed], counts[triage.Verified], counts[triage.Uncorroborated], counts[triage.Filtered], policy, blocking)
+	if blocking > 0 {
+		return c.exitCode
 	}
 	return exitOK
 }

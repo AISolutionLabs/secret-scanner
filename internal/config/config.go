@@ -28,6 +28,9 @@ type Config struct {
 	Allowlist   *Allowlist  `json:"allowlist"`  // legacy single global allowlist
 	Allowlists  []Allowlist `json:"allowlists"` // global allowlists
 	Remediation Remediation `json:"remediation"`
+	// Policy decides what blocks: "strict" (every finding) or "balanced"
+	// (only high-confidence findings; the rest are reported for review).
+	Policy string `json:"policy"`
 }
 
 // Remediation sets organization defaults for fix guidance.
@@ -74,6 +77,10 @@ type Allowlist struct {
 	Regexes     []string `json:"regexes"`
 	Stopwords   []string `json:"stopwords"`
 	TargetRules []string `json:"targetRules"` // global allowlists only
+	// TargetTags limits a global allowlist to rules carrying one of these
+	// tags (e.g. ["generic"]), so value-based suppressions written for noisy
+	// generic rules can never hide a structured provider token.
+	TargetTags []string `json:"targetTags"`
 }
 
 // Severity levels, ordered.
@@ -252,6 +259,10 @@ func loadWithExtends(path string, depth int) (*Config, []string, error) {
 // by top's version; allowlists accumulate.
 func merge(base, top *Config) *Config {
 	out := &Config{Title: top.Title, Description: top.Description, Extend: top.Extend, Remediation: base.Remediation}
+	out.Policy = base.Policy
+	if top.Policy != "" {
+		out.Policy = top.Policy
+	}
 	if top.Remediation.Store != "" {
 		out.Remediation.Store = top.Remediation.Store
 	}
@@ -397,6 +408,7 @@ type CompiledRule struct {
 	Generic    bool // tagged "generic": yields to specific rules on overlap
 	Multiline  bool // regex can span lines; widens keyword windows
 	Bounded    bool // token rule: boundary chars are checked in code, not regex
+	Semi       bool // keyword-context rule ("name = value" with a provider charset)
 	Before     int  // keyword window radius before / after an occurrence
 	After      int
 	numGroups  int
@@ -415,6 +427,7 @@ type CompiledAllowlist struct {
 	Regexes     []*regexp.Regexp
 	Stopwords   []string
 	TargetRules map[string]bool
+	TargetTags  map[string]bool
 }
 
 // Ruleset is a compiled config.
@@ -422,13 +435,19 @@ type Ruleset struct {
 	Rules       []*CompiledRule
 	Allowlists  []*CompiledAllowlist // global
 	Remediation Remediation
+	Policy      string
 }
 
 // Compile validates and compiles a resolved config.
 func Compile(c *Config) (*Ruleset, error) {
-	rs := &Ruleset{Remediation: c.Remediation}
+	rs := &Ruleset{Remediation: c.Remediation, Policy: c.Policy}
 	seen := map[string]bool{}
 	var errs []string
+	switch c.Policy {
+	case "", "strict", "balanced":
+	default:
+		errs = append(errs, fmt.Sprintf("policy %q: want strict or balanced", c.Policy))
+	}
 	for _, r := range c.Rules {
 		cr, err := compileRule(r)
 		if err != nil {
@@ -488,6 +507,7 @@ func compileRule(r Rule) (*CompiledRule, error) {
 		}
 		cr.Before, cr.After = 256, 2048
 		if strings.Contains(src, SemiMarker) {
+			cr.Semi = true
 			cr.Before, cr.After = 80, 1100
 		}
 		for _, t := range r.Tags {
@@ -542,7 +562,7 @@ func compileRule(r Rule) (*CompiledRule, error) {
 }
 
 func compileAllowlist(a Allowlist, global bool) (*CompiledAllowlist, error) {
-	ca := &CompiledAllowlist{Description: a.Description, Commits: map[string]bool{}, TargetRules: map[string]bool{}}
+	ca := &CompiledAllowlist{Description: a.Description, Commits: map[string]bool{}, TargetRules: map[string]bool{}, TargetTags: map[string]bool{}}
 	switch strings.ToUpper(strings.TrimSpace(a.Condition)) {
 	case "", "OR":
 	case "AND", "&&":
@@ -581,6 +601,12 @@ func compileAllowlist(a Allowlist, global bool) (*CompiledAllowlist, error) {
 	if len(a.TargetRules) > 0 && !global {
 		return nil, fmt.Errorf("targetRules is only valid in global allowlists")
 	}
+	if len(a.TargetTags) > 0 && !global {
+		return nil, fmt.Errorf("targetTags is only valid in global allowlists")
+	}
+	for _, t := range a.TargetTags {
+		ca.TargetTags[t] = true
+	}
 	for _, t := range a.TargetRules {
 		ca.TargetRules[t] = true
 	}
@@ -593,7 +619,7 @@ func compileAllowlist(a Allowlist, global bool) (*CompiledAllowlist, error) {
 // PathAllowed reports whether a path alone (no other criteria needed) is
 // allowlisted, letting sources skip files cheaply.
 func (a *CompiledAllowlist) PathAllowed(path string) bool {
-	if len(a.TargetRules) > 0 || len(a.Paths) == 0 {
+	if len(a.TargetRules) > 0 || len(a.TargetTags) > 0 || len(a.Paths) == 0 {
 		return false
 	}
 	if a.And && (len(a.Commits)+len(a.Regexes)+len(a.Stopwords) > 0) {
@@ -682,4 +708,30 @@ func (a *CompiledAllowlist) prefixCommit(commit string) bool {
 		}
 	}
 	return false
+}
+
+// HasTag reports whether the rule carries tag t.
+func (r *CompiledRule) HasTag(t string) bool {
+	for _, x := range r.Tags {
+		if x == t {
+			return true
+		}
+	}
+	return false
+}
+
+// AppliesTo reports whether a global allowlist is scoped to this rule.
+func (a *CompiledAllowlist) AppliesTo(r *CompiledRule) bool {
+	if len(a.TargetRules) > 0 && !a.TargetRules[r.ID] {
+		return false
+	}
+	if len(a.TargetTags) > 0 {
+		for _, t := range r.Tags {
+			if a.TargetTags[t] {
+				return true
+			}
+		}
+		return false
+	}
+	return true
 }

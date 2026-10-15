@@ -352,3 +352,95 @@ func TestFixStagedAndPatchWarning(t *testing.T) {
 		t.Errorf("--fix on history should be refused")
 	}
 }
+
+func TestPoliciesAndLedger(t *testing.T) {
+	dir := t.TempDir()
+	// Only an ambiguous finding: a short generic value in a test file.
+	writeFile(t, filepath.Join(dir, "tests/test_cfg.py"), "client_secret = \"Zq7wPv2kLm9xR4\"\nauth_provider = \"isOnDemandRevalidate\"\n")
+	if r := run(t, dir, "", "dir", "."); r.code != 1 {
+		t.Errorf("strict should block the ambiguous finding: %+v", r)
+	}
+	r := run(t, dir, "", "dir", ".", "--policy", "balanced")
+	if r.code != 0 || !strings.Contains(r.stdout, "Needs review") || !strings.Contains(r.stderr, "0 blocking, 1 to review") {
+		t.Errorf("balanced should report but not block:\n%s\n%s", r.stdout, r.stderr)
+	}
+	if !strings.Contains(r.stderr, "1 candidates filtered as noise (1 word-like") {
+		t.Errorf("suppression counts missing: %s", r.stderr)
+	}
+	r = run(t, dir, "", "dir", ".", "--show-suppressed", "-q")
+	if !strings.Contains(r.stderr, "tests/test_cfg.py:2") || !strings.Contains(r.stderr, "word-like") {
+		t.Errorf("ledger not listed: %s", r.stderr)
+	}
+	r = run(t, dir, "", "dir", ".", "--min-confidence", "high")
+	if r.code != 0 || !strings.Contains(r.stderr, "1 below --min-confidence hidden") {
+		t.Errorf("min-confidence should hide and count: %+v", r)
+	}
+	// A provider token blocks under balanced too, even in a test file.
+	writeFile(t, filepath.Join(dir, "tests/test_gh.py"), "GH = \""+pat()+"\"\n")
+	if r := run(t, dir, "", "dir", ".", "--policy", "balanced"); r.code != 1 {
+		t.Errorf("high-confidence finding must block under balanced: %+v", r)
+	}
+	// Policy from config.
+	writeFile(t, filepath.Join(dir, ".secretscan.toml"), "policy = \"balanced\"\n")
+	os.Remove(filepath.Join(dir, "tests/test_gh.py"))
+	if r := run(t, dir, "", "dir", "."); r.code != 0 {
+		t.Errorf("config policy not applied: %+v", r)
+	}
+	if r := run(t, dir, "", "dir", ".", "--policy", "lenient"); r.code != 2 {
+		t.Errorf("unknown policy should exit 2")
+	}
+}
+
+func TestBalancedHook(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	repo := t.TempDir()
+	if out, err := gitCmd(t, repo, "init", "-q", "-b", "main"); err != nil {
+		t.Fatal(out)
+	}
+	if r := run(t, repo, "", "install-hook", "--policy", "balanced"); r.code != 0 {
+		t.Fatalf("install: %+v", r)
+	}
+	writeFile(t, filepath.Join(repo, "tests/test_cfg.py"), "client_secret = \"Zq7wPv2kLm9xR4\"\n")
+	gitCmd(t, repo, "add", ".")
+	out, err := gitCmd(t, repo, "commit", "-qm", "ambiguous")
+	if err != nil || !strings.Contains(out, "Needs review") {
+		t.Fatalf("balanced hook should let the commit through with a review note: %v\n%s", err, out)
+	}
+	writeFile(t, filepath.Join(repo, "app.py"), "GH = \""+pat()+"\"\n")
+	gitCmd(t, repo, "add", ".")
+	if out, err := gitCmd(t, repo, "commit", "-qm", "token"); err == nil {
+		t.Fatalf("balanced hook must block a provider token:\n%s", out)
+	}
+	if r := run(t, repo, "", "install-hook", "--policy", "yolo"); r.code != 2 {
+		t.Errorf("bad hook policy should exit 2")
+	}
+}
+
+func TestTriageCLI(t *testing.T) {
+	dir := t.TempDir()
+	p := pat()
+	writeFile(t, filepath.Join(dir, "app.py"), "GH = \""+p+"\"\n")
+	writeFile(t, filepath.Join(dir, "Jenkinsfile"), "    [envVar: 'TF_VAR_APPROLESECRETID', vaultKey: 'inf-vsqt-01-secret-id']]]]) {\n")
+	rep, _ := json.Marshal([]map[string]any{
+		{"RuleID": "github-pat", "File": "app.py", "StartLine": 1, "Secret": p},
+		{"RuleID": "generic-api-key", "File": "Jenkinsfile", "StartLine": 1, "Secret": "inf-vsqt-01-secret-id"},
+	})
+	writeFile(t, filepath.Join(dir, "gl.json"), string(rep))
+	r := run(t, dir, "", "triage", "gl.json")
+	if r.code != 1 || !strings.Contains(r.stderr, "1 confirmed") || !strings.Contains(r.stderr, "1 filtered as noise") ||
+		!strings.Contains(r.stdout, "Filtered as noise (1") {
+		t.Errorf("triage: %+v", r)
+	}
+	r = run(t, dir, "", "triage", "gl.json", "-f", "json")
+	var fs []map[string]any
+	if err := json.Unmarshal([]byte(r.stdout), &fs); err != nil || len(fs) != 2 {
+		t.Fatalf("triage json must include filtered findings too: %v %s", err, r.stdout)
+	}
+	rep, _ = json.Marshal([]map[string]any{{"RuleID": "generic-api-key", "File": "Jenkinsfile", "StartLine": 1, "Secret": "inf-vsqt-01-secret-id"}})
+	writeFile(t, filepath.Join(dir, "gl2.json"), string(rep))
+	if r := run(t, dir, "", "triage", "gl2.json"); r.code != 0 {
+		t.Errorf("only noise should not block: %+v", r)
+	}
+}

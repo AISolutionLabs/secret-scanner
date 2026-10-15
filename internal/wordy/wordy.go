@@ -8,7 +8,7 @@
 // and documentation (go generate ./internal/wordy).
 package wordy
 
-//go:generate go run ./gen -out table.go /usr/lib/python3.13
+//go:generate sh -c "go run ./gen -out table.go -max-files 12000 /usr/lib/python3.13 $(go env GOROOT)/src"
 
 // index maps '^' (start), 'a'..'z', '$' (end) to 0..27.
 func index(c byte) int {

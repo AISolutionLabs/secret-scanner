@@ -41,19 +41,33 @@ to syntax-check the remediation snippets.
    numbers in the PR:
 
    ```sh
-   bench/fetch-corpus.sh      # once
-   python3 bench/run.py secretscan
+   bench/fetch-corpus.sh                  # once
+   python3 bench/precision.py             # recall, precision, issue FPs, noise, latency vs gitleaks
    HOLDOUT=1 python3 bench/run.py secretscan
    ```
+
+   A change that reduces noise must not reduce recall on the tuning,
+   held-out or safety sets.
 
    Don't tune against the held-out set. It exists to catch overfitting.
 
 ## False-positive filters
 
+See [docs/precision.md](docs/precision.md) for the pipeline, the evidence
+model and the suppression rules.
+
+
 Generic-rule filters live in `internal/detect/detect.go` (`genericNoise`,
-`weakPasswordNoise`, ...). Every filter needs a regression test with the real
-false positive that motivated it (sanitized) and must not reduce recall on
-either labeled set.
+`weakPasswordNoise`, ...) and must return a named reason (it appears in the
+suppression ledger). Every filter needs:
+
+- a regression test with the real false positive that motivated it (sanitized);
+- a case in `internal/detect/precision_test.go` proving it does not hide a
+  valid secret next to it;
+- no recall loss on the tuning, held-out or safety sets.
+
+Value-based suppressions must be scoped to generic rules (`targetTags`):
+never filter a provider-format token with a word list.
 
 ## Reporting security issues
 

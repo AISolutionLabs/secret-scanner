@@ -22,6 +22,7 @@ import (
 type Options struct {
 	Color       bool
 	Remediation string // text: short (default) | full | none
+	Policy      string // strict | balanced: text output groups non-blocking findings for review
 }
 
 // Formats lists supported report formats.
@@ -86,12 +87,21 @@ func Text(w io.Writer, fs []detect.Finding, o Options) error {
 		}
 		return code + s + cReset
 	}
+	reviewHeader := false
 	for _, f := range fs {
+		if !f.Blocking && o.Policy == "balanced" && !reviewHeader {
+			reviewHeader = true
+			fmt.Fprintf(w, "%s\n\n", c(cBold+cYel, "── Needs review (not blocking under the balanced policy) ──"))
+		}
 		loc := f.File
 		if f.StartLine > 0 {
 			loc = fmt.Sprintf("%s:%d:%d", f.File, f.StartLine, f.StartColumn)
 		}
-		fmt.Fprintf(w, "%s %s %s  %s\n", c(cBold+sevColor(f.Severity), "["+strings.ToUpper(f.Severity)+"]"),
+		conf := ""
+		if f.Confidence != "" {
+			conf = "·" + f.Confidence
+		}
+		fmt.Fprintf(w, "%s %s %s  %s\n", c(cBold+sevColor(f.Severity), "["+strings.ToUpper(f.Severity)+conf+"]"),
 			c(cBold, f.RuleID), c(cDim, f.Description), loc)
 		if f.Secret != "" {
 			fmt.Fprintf(w, "    secret:  %s\n", c(sevColor(f.Severity), oneLine(f.Secret, 120)))
@@ -105,12 +115,18 @@ func Text(w io.Writer, fs []detect.Finding, o Options) error {
 		if f.Commit != "" {
 			fmt.Fprintf(w, "    commit:  %s  %s <%s>  %s\n", short(f.Commit), f.Author, f.Email, f.Date)
 		}
+		if f.Source != "" {
+			fmt.Fprintf(w, "    source:  %s · %s\n", f.Source, f.Triage)
+		}
 		if f.Verification != "" {
 			v := f.Verification
 			if v == "verified" {
 				v = c(cBold+cRed, "VERIFIED LIVE")
 			}
 			fmt.Fprintf(w, "    verify:  %s\n", v)
+		}
+		if len(f.Evidence) > 0 && (o.Remediation == "full" || f.Confidence != detect.High) {
+			fmt.Fprintf(w, "    why:     %s\n", c(cDim, strings.Join(f.Evidence, "; ")))
 		}
 		writeRemediation(w, f, o, c)
 		fmt.Fprintf(w, "    ignore:  %s\n\n", c(cDim, f.Fingerprint))
@@ -158,10 +174,10 @@ func Summary(fs []detect.Finding) string {
 // CSV writes one row per finding.
 func CSV(w io.Writer, fs []detect.Finding) error {
 	cw := csv.NewWriter(w)
-	_ = cw.Write([]string{"RuleID", "Severity", "File", "StartLine", "EndLine", "StartColumn", "EndColumn", "Secret", "Match",
+	_ = cw.Write([]string{"RuleID", "Severity", "Confidence", "Blocking", "File", "StartLine", "EndLine", "StartColumn", "EndColumn", "Secret", "Match",
 		"Entropy", "Decoded", "Commit", "Author", "Email", "Date", "Fingerprint", "SecretHash", "Verification"})
 	for _, f := range fs {
-		_ = cw.Write([]string{f.RuleID, f.Severity, f.File, strconv.Itoa(f.StartLine), strconv.Itoa(f.EndLine),
+		_ = cw.Write([]string{f.RuleID, f.Severity, f.Confidence, strconv.FormatBool(f.Blocking), f.File, strconv.Itoa(f.StartLine), strconv.Itoa(f.EndLine),
 			strconv.Itoa(f.StartColumn), strconv.Itoa(f.EndColumn), f.Secret, f.Match,
 			strconv.FormatFloat(f.Entropy, 'f', 2, 64), f.Decoded, f.Commit, f.Author, f.Email, f.Date,
 			f.Fingerprint, f.SecretHash, f.Verification})
@@ -252,7 +268,7 @@ func SARIF(w io.Writer, fs []detect.Finding, rules []*config.CompiledRule, versi
 		if len(region) > 0 {
 			phys["region"] = region
 		}
-		props := map[string]any{"commit": f.Commit, "author": f.Author, "email": f.Email, "date": f.Date, "entropy": f.Entropy}
+		props := map[string]any{"confidence": f.Confidence, "evidence": f.Evidence, "blocking": f.Blocking, "commit": f.Commit, "author": f.Author, "email": f.Email, "date": f.Date, "entropy": f.Entropy}
 		if f.Decoded != "" {
 			props["decoded"] = f.Decoded
 		}
@@ -264,7 +280,7 @@ func SARIF(w io.Writer, fs []detect.Finding, rules []*config.CompiledRule, versi
 		}
 		results = append(results, map[string]any{
 			"ruleId":              f.RuleID,
-			"level":               sarifLevel(f.Severity),
+			"level":               resultLevel(f),
 			"message":             msg{fmt.Sprintf("%s detected", f.Description)},
 			"locations":           []any{map[string]any{"physicalLocation": phys}},
 			"partialFingerprints": map[string]string{"secretscan/v1": f.SecretHash, "fingerprint": f.Fingerprint},
@@ -382,4 +398,61 @@ func nonEmpty(s, def string) string {
 		return def
 	}
 	return s
+}
+
+// PolicyLine summarizes what blocks, what needs review and what filters
+// removed, so nothing is silently dropped.
+func PolicyLine(fs []detect.Finding, policy string, hidden int, suppressed map[string]int) string {
+	block, review := 0, 0
+	for _, f := range fs {
+		if f.Blocking {
+			block++
+		} else {
+			review++
+		}
+	}
+	var parts []string
+	if len(fs) > 0 || hidden > 0 {
+		parts = append(parts, fmt.Sprintf("policy %s: %d blocking, %d to review", policy, block, review))
+	}
+	if hidden > 0 {
+		parts = append(parts, fmt.Sprintf("%d below --min-confidence hidden", hidden))
+	}
+	total := 0
+	for _, n := range suppressed {
+		total += n
+	}
+	if total > 0 {
+		keys := make([]string, 0, len(suppressed))
+		for k := range suppressed {
+			keys = append(keys, k)
+		}
+		sort.Slice(keys, func(i, j int) bool { return suppressed[keys[i]] > suppressed[keys[j]] })
+		var why []string
+		for i, k := range keys {
+			if i == 4 {
+				why = append(why, "…")
+				break
+			}
+			why = append(why, fmt.Sprintf("%d %s", suppressed[k], k))
+		}
+		parts = append(parts, fmt.Sprintf("%d candidates filtered as noise (%s; --show-suppressed to list)", total, strings.Join(why, ", ")))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "  " + strings.Join(parts, " · ")
+}
+
+// resultLevel follows the policy: blocking findings are errors; findings
+// left for review are warnings (medium) or notes (low), so CI gates that
+// fail on SARIF errors match the scanner's own exit code.
+func resultLevel(f detect.Finding) string {
+	if f.Blocking {
+		return "error"
+	}
+	if f.Confidence == detect.Medium {
+		return "warning"
+	}
+	return "note"
 }

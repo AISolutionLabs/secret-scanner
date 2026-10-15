@@ -19,4 +19,5 @@ fetch_py  "$W/dl2/py" "fastapi pydantic celery msal azure-identity hvac stripe t
 
 python3 gen_positives.py "$W/positives"
 python3 gen_holdout.py "$W/holdout"
+python3 gen_precision_sets.py "$W"
 echo "corpora ready in $W"

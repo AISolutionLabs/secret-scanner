@@ -302,10 +302,9 @@ func DefaultRules() []Rule {
 			Allowlists: []Allowlist{
 				{Description: "common non-secret words", Stopwords: genericStopwords},
 				{Description: "non-secret shapes", Regexes: []string{
-					`^[a-zA-Z_]+(?:\.[a-zA-Z_]+)+$`, // dotted identifiers
-					`^[a-z]+(?:[_-][a-z]+)+$`,       // snake/kebab words
-					`^[A-Z][A-Z0-9_]+$`,             // ENV_VAR_NAMES
-					`^(?:[a-z]+[A-Z][a-z]+)+$`,      // camelCase words
+					`^[a-zA-Z_]+(?:\.[a-zA-Z_]+)+$`,   // dotted identifiers
+					`^[a-z]+(?:[_-][a-z]+)+$`,         // snake/kebab words
+					`^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$`, // ENV_VAR_NAMES (must contain _)
 					`^(?i:true|false|null|none|nil|undefined)$`,
 					`^[0-9.]+$`,
 					`^v?\d+\.\d+\.\d+(?:[-+][\w.-]+)?$`, // semver / Go pseudo-versions
@@ -314,6 +313,9 @@ func DefaultRules() []Rule {
 				}},
 				nameAllowlist, hashedValues,
 
+				{Description: "pagination tokens in docs and API examples", RegexTarget: "line", Regexes: []string{
+					`(?i)\b(?:next|previous|prev|continuation)[ _-]?(?:page[ _-]?)?(?:token|marker|cursor)\b["']?\s*[:=]`,
+				}},
 				{Description: "value read from env/secret store", RegexTarget: "line", Regexes: []string{
 					`(?i)(?:getenv|environ\[|process\.env|secretKeyRef|valueFrom|keyvault|\$\(\w+\)|\{\{\s*secrets\.)`,
 				}},
@@ -351,17 +353,27 @@ var genericStopwords = []string{
 
 // DefaultAllowlists are global allowlists shipped with the default pack.
 func DefaultAllowlists() []Allowlist {
+	// Suppressions are deliberately narrow:
+	//   - only content we cannot meaningfully scan (binaries, media, vendored
+	//     third-party trees) is skipped for every rule;
+	//   - lockfiles, scanner configs and placeholder-looking values are only
+	//     exempt from noisy generic rules, so a structured provider token or a
+	//     credential in a registry URL inside them is still reported.
 	return []Allowlist{
-		{Description: "binary, media and lock files", Paths: []string{
+		{Description: "binary and media files, vendored third-party trees", Paths: []string{
 			`(?i)\.(?:png|jpe?g|gif|bmp|ico|webp|tiff?|svg|woff2?|ttf|otf|eot|pdf|zip|gz|tgz|bz2|xz|7z|rar|jar|war|ear|class|exe|dll|so|dylib|a|o|bin|dat|mp[34]|mov|avi|wav|flac|ogg|pyc|whl|egg|wasm|DS_Store)$`,
-			`(?:^|/)(?:go\.sum|go\.work\.sum|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb|poetry\.lock|Pipfile\.lock|uv\.lock|Cargo\.lock|composer\.lock|Gemfile\.lock|gradle\.lockfile|packages\.lock\.json|MODULE\.bazel\.lock)$`,
 			`(?:^|/)(?:node_modules|\.git|\.venv|__pycache__|\.terraform/providers)/`,
+			`(?:^|/)(?:gradlew|mvnw)(?:\.bat|\.cmd)?$`,
+		}},
+		{Description: "lockfiles and package metadata (generic rules only)", TargetTags: []string{"generic"}, Paths: []string{
+			`(?:^|/)(?:go\.sum|go\.work\.sum|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb|poetry\.lock|Pipfile\.lock|uv\.lock|Cargo\.lock|composer\.lock|Gemfile\.lock|gradle\.lockfile|packages\.lock\.json|MODULE\.bazel\.lock)$`,
 			`(?:^|/)[\w.+-]+\.dist-info/(?:RECORD|METADATA|WHEEL)$`,
 			`(?:^|/)vendor/modules\.txt$`,
-			`(?:^|/)(?:gradlew|mvnw)(?:\.bat|\.cmd)?$`,
+		}},
+		{Description: "scanner config and ignore files (generic and custom-rule self-tests only)", TargetTags: []string{"generic", "custom"}, Paths: []string{
 			`(?:^|/)(?:\.?secretscan\.toml|\.gitleaks\.toml|gitleaks\.toml|\.secretscanignore|\.gitleaksignore|\.secrets\.baseline)$`,
 		}},
-		{Description: "placeholders and templated values", Regexes: []string{
+		{Description: "placeholders and templated values (generic and credential rules only)", TargetTags: []string{"generic", "credentials"}, Regexes: []string{
 			`^\$\{[^}]*\}$`, `^\$\([^)]*\)$`, `^\{\{.*\}\}$`, `^<[^>]+>$`, `^%[A-Za-z_]+%$`, `^\$[A-Z_][A-Z0-9_]*$`,
 			`^\{[A-Za-z_][\w.]*\}$`, `^%\(\w+\)s$`, `^@[A-Za-z_]\w*@$`, `^#\{[^}]+\}$`,
 			`^[*xX#•.]+$`,
@@ -381,7 +393,7 @@ func Default() *Config {
 // evaluated against the match text before the secret ("prefix").
 var nameAllowlist = Allowlist{Description: "names that hold identifiers, not secrets", RegexTarget: "prefix", Regexes: []string{
 	`(?i)(?:name|ids?|arn|ur[il]|path|type|mode|version|region|endpoint|header|label|format|prefix|suffix|count|length|size|marker|class|kind|enabled|required|field)["'\x60]?\s*(?:=|:|=>|,|\?=)?\s*["'\x60]?$`,
-	`(?i)(?:next|continuation|pagination|page|sync|resume|cursor|verification|idempotency|request|client)[_.-]?(?:token|marker|key)`,
+	`(?i)(?:next|previous|prev|continuation|pagination|page|sync|resume|cursor|verification|idempotency|request|client)[ _.-]?(?:page[ _.-]?)?(?:token|marker|key|cursor)`,
 	`(?i)(?:^|[^a-z])(?:pub(?:lic)?|primary|foreign|sort|partition|cache|idempotency|dedup(?:e|lication)?|bucket|object|sequence|natural|schema)[_.-]?keys?(?:[^a-z]|$)`,
 	`(?i)(?:^|[^a-z])keys?[_.-]?(?:ids?|name|alias|path|file|size|length|type|usage|pair|ring|code|board|word|frame|spec|hash|version|format|prefix|count|fingerprint|vault[_.-]?(?:id|name|uri|url))(?:[^a-z]|$)`,
 	`(?i)(?:^|[^a-z])tokens?[_.-]?(?:url|uri|endpoint|type|ttl|expir\w*|count|limit|file|path|name|header|prefix|kind|usage)(?:[^a-z]|$)`,
