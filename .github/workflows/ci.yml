@@ -18,7 +18,16 @@ jobs:
         with: { go-version-file: go.mod }
       - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - run: go vet ./...
-      - run: go test -race -count=1 ./...
+      - name: go test -race
+        shell: bash
+        # Failing tests are also emitted as annotations, so they are visible
+        # without downloading the log.
+        run: |
+          set +e
+          go test -race -count=1 ./... 2>&1 | tee test.log
+          status=${PIPESTATUS[0]}
+          grep -E -- '--- FAIL|_test\.go:[0-9]+:|panic:|cannot|error' test.log | head -40 | sed 's/^/::error::/'
+          exit $status
       - name: Measure filter false negatives (20,000 random secrets per alphabet)
         shell: bash
         run: go test -count=1 -run 'PerAlphabet|SpareRandomSecrets' -v ./internal/detect | grep -E '^\s*\||lost|ok|FAIL'
