@@ -223,27 +223,33 @@ func (t *Triager) resolve(file string) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
+	realRoot := root
 	if r, err := filepath.EvalSymlinks(root); err == nil {
-		root = r
+		realRoot = r
 	}
 	p := filepath.FromSlash(file)
 	if !filepath.IsAbs(p) {
 		p = filepath.Join(root, p)
 	}
 	p = filepath.Clean(p)
-	inside := func(x string) (string, bool) {
-		rel, err := filepath.Rel(root, x)
+	inside := func(base, x string) (string, bool) {
+		rel, err := filepath.Rel(base, x)
 		return rel, err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 	}
-	rel, ok := inside(p)
+	// Lexically inside --root, as given or as resolved (an absolute report
+	// path may be spelled either way, e.g. /var vs /private/var on macOS).
+	rel, ok := inside(root, p)
 	if !ok {
-		return "", "", fmt.Errorf("path outside --root")
+		if rel, ok = inside(realRoot, p); !ok {
+			return "", "", fmt.Errorf("path outside --root")
+		}
 	}
-	// Resolve symlinks on the deepest existing ancestor too: a missing file
-	// under a symlinked directory must not escape the check.
+	// Then resolve symlinks on the deepest existing ancestor: neither the
+	// file nor any directory on the way may lead outside --root, even when
+	// the file itself does not exist yet.
 	for dir, rest := p, ""; ; {
 		if real, err := filepath.EvalSymlinks(dir); err == nil {
-			if _, ok := inside(filepath.Join(real, rest)); !ok {
+			if _, ok := inside(realRoot, filepath.Join(real, rest)); !ok {
 				return "", "", fmt.Errorf("symlink resolves outside --root")
 			}
 			break
