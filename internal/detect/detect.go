@@ -930,6 +930,11 @@ func looksLikeIdentifier(s string, quoted bool) bool {
 			return false
 		}
 	}
+	// Hex with both letters and digits (acc993b3319ddf05...) is data, not a
+	// name; digit-heavy identifiers (Ed25519Key, x509) contain non-hex letters.
+	if isHexData(s) {
+		return false
+	}
 	flush := func(end int) {
 		if end > start {
 			words = append(words, s[start:end])
@@ -974,6 +979,24 @@ func looksLikeIdentifier(s string, quoted bool) bool {
 		return short == 0 && len(words) >= 3
 	}
 	return short*3 <= len(words)
+}
+
+func isHexData(s string) bool {
+	if len(s) < 12 {
+		return false
+	}
+	letters, digits := 0, 0
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c >= '0' && c <= '9':
+			digits++
+		case c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+			letters++
+		default:
+			return false
+		}
+	}
+	return letters > 0 && digits > 0
 }
 
 // asciiLower lowercases ASCII letters only, preserving byte offsets.

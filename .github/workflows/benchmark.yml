@@ -1,0 +1,31 @@
+name: benchmark
+# Reproduces every published benchmark with pinned tools and datasets
+# (bench/reproduce.sh). Run it from the Actions tab, in this repository or in
+# a fork, to check the numbers in bench/results without trusting anyone's
+# machine. Results are uploaded as the "benchmark-results" artifact.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 1 * *" # monthly, so drift in the pinned setup shows up
+permissions:
+  contents: read
+jobs:
+  reproduce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Reproduce
+        run: bash bench/reproduce.sh "$RUNNER_TEMP/results"
+      - name: Summary
+        if: always()
+        run: cat "$RUNNER_TEMP/results/SUMMARY.md" >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-results
+          path: ${{ runner.temp }}/results

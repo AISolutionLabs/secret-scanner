@@ -251,3 +251,69 @@ func FuzzResolveStaysInRoot(f *testing.F) {
 		}
 	})
 }
+
+func uuidv(seed int64) string {
+	r := rand.New(rand.NewSource(seed))
+	const hx = "0123456789abcdef"
+	b := make([]byte, 36)
+	for i := range b {
+		b[i] = hx[r.Intn(16)]
+	}
+	b[8], b[13], b[18], b[23] = '-', '-', '-', '-'
+	return string(b)
+}
+
+func hexv(n int, seed int64) string {
+	r := rand.New(rand.NewSource(seed))
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = "0123456789abcdef"[r.Intn(16)]
+	}
+	return string(b)
+}
+
+// One case per class of real secret that standard triage filtered on
+// CredData, plus the false positives that must stay filtered. Conservative
+// (the default) keeps values under credential-named keys; standard applies
+// every filter.
+func TestConservativeTriageMissedClasses(t *testing.T) {
+	type tc struct {
+		name, file, body, secret string
+		keepConservative         bool
+		keepStandard             bool
+	}
+	u, h := uuidv(31), hexv(32, 32)
+	b64 := tok("", 40, 33) + "+/" + tok("", 20, 34) + "=="
+	nextTok := tok("", 56, 35)
+	cases := []tc{
+		{"uuid under a token key", "a.json", `{"access_token": "` + u + `"}`, u, true, false},
+		{"uuid under tokenValue", "a.js", `const tokenValue = "` + u + `";`, u, true, false},
+		{"uuid under Go :=", "a.go", `secretVal := "` + u + `"`, u, true, false},
+		{"unquoted hex value", "vectors.txt", "Key = " + h, h, true, true}, // identifier bug fixed for both modes
+		{"pagination-named token", "resp.json", `"nextToken": "` + nextTok + `"`, nextTok, true, false},
+		{"base64 under key = (operator heuristic)", "conf.txt", "key = " + b64, b64, true, false},
+		{"literal default of getenv", "settings.py", `"cookie_secret": os.getenv("cookie_secret", "` + tok("", 32, 36) + `"),`, tok("", 32, 36), true, false},
+		// Must stay filtered in both modes.
+		{"value that names a secret", "Jenkinsfile", "    [envVar: 'TF_VAR_APPROLESECRETID', vaultKey: 'inf-vsqt-01-secret-id']]]]) {", "inf-vsqt-01-secret-id", false, false},
+		{"snake-case identifier under a key", "ecdh.txt", "PrivateKey=ALICE_secp112r2", "ALICE_secp112r2", false, false},
+		{"uuid under a non-credential key", "a.json", `{"requestId": "` + uuidv(37) + `"}`, uuidv(37), false, false},
+		{"uuid request token (trufflehog#3578 class)", "a.json", `{"request_token": "` + uuidv(38) + `"}`, uuidv(38), false, false},
+		{"uuid idempotency key", "a.json", `{"idempotency_key": "` + uuidv(39) + `"}`, uuidv(39), false, false},
+		{"random secret reference under a key (gitleaks#1468 class)", "Jenkinsfile", "    [envVar: 'TF_VAR_JISLRBFA', vaultKey: 'oqi-lumo-08-secret-id']", "oqi-lumo-08-secret-id", false, false},
+	}
+	for _, c := range cases {
+		for _, mode := range []string{Conservative, Standard} {
+			tr := setup(t, map[string]string{c.file: c.body + "\n"})
+			tr.Mode = mode
+			f := tr.Evaluate(Input{Tool: "gitleaks", RuleID: "generic-api-key", File: c.file, StartLine: 1, Secret: c.secret})
+			kept := !strings.HasPrefix(f.Triage, Filtered)
+			want := c.keepStandard
+			if mode == Conservative {
+				want = c.keepConservative
+			}
+			if kept != want {
+				t.Errorf("%s [%s]: triage=%q evidence=%v, want kept=%v", c.name, mode, f.Triage, f.Evidence, want)
+			}
+		}
+	}
+}

@@ -16,6 +16,12 @@ label at all are counted separately as "unlabeled": CredData's labels were
 built by reviewing what earlier tools reported, so they are neither true nor
 false positives by its method.
 
+Splits (--split), fixed on 2026-10-16 before any per-half result was looked
+at: a repository is "dev" if the first hex digit of sha256(RepoName) is 0-7,
+otherwise "test". Changes informed by CredData are developed on dev only and
+reported on test, so test stays a holdout. The first published run (2026-10-15)
+used all repositories before any change.
+
 Two views, fixed before any tool was run on the data:
   official      CredData's labels as given
   secrets-only  the same, without categories that are identifiers rather
@@ -23,7 +29,7 @@ Two views, fixed before any tool was run on the data:
                 Tencent WeChat API App ID, Nonce, Salt. A T row in only these
                 categories counts as unlabeled in this view.
 """
-import argparse, collections, csv, glob, json, os, shutil, subprocess, sys, tempfile
+import argparse, collections, csv, glob, hashlib, json, os, shutil, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SS = os.environ.get("SECRETSCAN", os.path.join(HERE, "..", "bin", "secretscan"))
@@ -31,10 +37,21 @@ GL = os.environ.get("GITLEAKS", shutil.which("gitleaks") or "")
 IDENTIFIER_CATEGORIES = {"UUID", "AWS S3 Bucket", "Firebase Domain", "Tencent WeChat API App ID", "Nonce", "Salt"}
 
 
-def load_meta(root):
+def half(repo):
+    return "dev" if hashlib.sha256(repo.encode()).hexdigest()[0] in "01234567" else "test"
+
+
+def repo_of(path):
+    parts = os.path.normpath(path).split(os.sep)
+    return parts[1] if len(parts) > 1 and parts[0] == "data" else ""
+
+
+def load_meta(root, split="all"):
     rows = collections.defaultdict(list)  # path -> [(start, end, label, categories)]
     for p in glob.glob(os.path.join(root, "meta", "*.csv")):
         for r in csv.DictReader(open(p)):
+            if split != "all" and half(r["RepoName"]) != split:
+                continue
             rows[r["FilePath"]].append((int(r["LineStart"]), int(r["LineEnd"]), r["GroundTruth"], set(r["Category"].split(":"))))
     return rows
 
@@ -82,7 +99,23 @@ def secretscan(root):
         os.remove(out)
 
 
+def secretscan_blocking(fixtures):
+    """Findings that block under the balanced policy (the git-hook default)."""
+    def run_it(root):
+        out = tmpjson()
+        try:
+            run([SS, "dir", "data", "-f", "json", "-r", out, "--exit-code", "0", "-q", "--redact",
+                 "--policy", "balanced", "--test-fixtures", fixtures], root)
+            return [(os.path.join("data", f["File"]), f["StartLine"], f.get("EndLine") or f["StartLine"], f["RuleID"])
+                    for f in json.load(open(out)) if f.get("Blocking")]
+        finally:
+            os.remove(out)
+    return run_it
+
+
 def gitleaks(root):
+    if GITLEAKS_REPORT:
+        return [(f["File"], f["StartLine"], f.get("EndLine") or f["StartLine"], f["RuleID"]) for f in json.load(open(GITLEAKS_REPORT))]
     out = tmpjson()
     try:
         run([GL, "dir", "data", "-f", "json", "-r", out, "--exit-code", "0", "--no-banner", "--log-level", "error", "--redact"], root)
@@ -91,15 +124,24 @@ def gitleaks(root):
         os.remove(out)
 
 
+TRIAGE_ARGS = []
+GITLEAKS_REPORT = None  # reuse an existing gitleaks JSON report instead of rescanning
+
+
 def gitleaks_triage(root):
     """gitleaks streamed into `secretscan triage` (no report on disk); findings
     triage filters as noise are dropped, everything else is kept."""
     out = tmpjson()
     try:
-        gl = subprocess.Popen([GL, "dir", "data", "-f", "json", "-r", "-", "--no-banner", "--log-level", "error", "--exit-code", "0"],
-                              cwd=root, stdout=subprocess.PIPE)
-        subprocess.run([SS, "triage", "-", "--root", ".", "-f", "json", "-r", out, "--exit-code", "0", "-q"], cwd=root, stdin=gl.stdout)
-        gl.wait()
+        cmd = [SS, "triage", "-", "--root", ".", "-f", "json", "-r", out, "--exit-code", "0", "-q"] + TRIAGE_ARGS
+        if GITLEAKS_REPORT:
+            with open(GITLEAKS_REPORT) as src:
+                subprocess.run(cmd, cwd=root, stdin=src, stderr=subprocess.DEVNULL)
+        else:
+            gl = subprocess.Popen([GL, "dir", "data", "-f", "json", "-r", "-", "--no-banner", "--log-level", "error", "--exit-code", "0"],
+                                  cwd=root, stdout=subprocess.PIPE)
+            subprocess.run(cmd, cwd=root, stdin=gl.stdout, stderr=subprocess.DEVNULL)
+            gl.wait()
         return [(f["File"], f["StartLine"], f.get("EndLine") or f["StartLine"], f["RuleID"]) for f in json.load(open(out))
                 if not (f.get("Triage") or "").startswith("filtered")]
     finally:
@@ -112,14 +154,18 @@ def detect_secrets(root):
     return [(f, it["line_number"], it["line_number"], it["type"]) for f, items in res.items() for it in items]
 
 
-TOOLS = {"secretscan": secretscan, "gitleaks": gitleaks, "gitleaks+triage": gitleaks_triage, "detect-secrets": detect_secrets}
+TOOLS = {"secretscan": secretscan, "secretscan-balanced-blocking": secretscan_blocking("block"),
+         "secretscan-balanced-blocking(fixtures=review)": secretscan_blocking("review"),
+         "gitleaks": gitleaks, "gitleaks+triage": gitleaks_triage, "detect-secrets": detect_secrets}
 
 
-def score(findings, meta, view):
+def score(findings, meta, view, split="all"):
     tl = true_lines(meta, view)
     found_t, fp, unl = set(), set(), set()
     for f, s, e, _ in findings:
         f = os.path.normpath(f)
+        if split != "all" and half(repo_of(f)) != split:
+            continue
         rows = meta.get(f, [])
         lab = None
         for line in range(s, max(s, e) + 1):  # multi-line findings (keys) match any covered line
@@ -145,13 +191,19 @@ def score(findings, meta, view):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("creddata")
-    ap.add_argument("--tools", default="secretscan,gitleaks,gitleaks+triage,detect-secrets")
+    ap.add_argument("--tools", default="secretscan,secretscan-balanced-blocking,secretscan-balanced-blocking(fixtures=review),"
+                    "gitleaks,gitleaks+triage,detect-secrets")
     ap.add_argument("--dump", help="write per-tool line lists (JSON) here")
+    ap.add_argument("--split", choices=["all", "dev", "test"], default="all")
+    ap.add_argument("--triage-args", default="", help="extra flags for secretscan triage, e.g. '--mode standard'")
+    ap.add_argument("--gitleaks-report", help="reuse this gitleaks JSON report (full values) instead of rescanning")
     a = ap.parse_args()
-    meta = load_meta(a.creddata)
+    TRIAGE_ARGS[:] = a.triage_args.split()
+    GITLEAKS_REPORT = a.gitleaks_report
+    meta = load_meta(a.creddata, a.split)
     commit = run(["git", "rev-parse", "--short", "HEAD"], a.creddata).stdout.strip()
     nfiles = sum(len(fs) for _, _, fs in os.walk(os.path.join(a.creddata, "data")))
-    print(f"CredData @ {commit}: {nfiles} files, {len(true_lines(meta, 'official'))} true lines "
+    print(f"CredData @ {commit}, split {a.split}: {nfiles} files in all, {len(true_lines(meta, 'official'))} true lines "
           f"({len(true_lines(meta, 'secrets-only'))} excluding identifier categories)\n")
     dump = {}
     results = {}
@@ -164,7 +216,7 @@ if __name__ == "__main__":
         print(f"### {view}\n")
         print("| Tool | TP | FP | FN | Precision | Recall | F1 | Findings on unlabeled lines |\n|---|---|---|---|---|---|---|---|")
         for name, fs in results.items():
-            r = score(fs, meta, view)
+            r = score(fs, meta, view, a.split)
             dump[f"{name}/{view}"] = {k: r[k] for k in ("unlabeled_lines", "fp_lines", "missed")}
             print(f"| {name} | {r['tp']} | {r['fp']} | {r['fn']} | {r['precision']:.1%} | {r['recall']:.1%} | {r['f1']:.3f} | {r['unlabeled']} |")
         print()

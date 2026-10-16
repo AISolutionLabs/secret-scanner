@@ -57,7 +57,13 @@ func TestFilterAdversarialCases(t *testing.T) {
 			reject: []filterCase{{line: `"downward_api": "V1DownwardAPIProjection",`}},
 		},
 		"identifier": {
-			keep:   []filterCase{{line: `api_secret = "MIVWdsoNuhGuoNge7Kx"`}}, // splits into 3+ letter runs, but random
+			keep: []filterCase{
+				{line: `api_secret = "MIVWdsoNuhGuoNge7Kx"`}, // splits into 3+ letter runs, but random
+				// Unquoted hex is data, not an identifier. Fixed values (random
+				// stand-ins from CredData) that the letter-run split once misread.
+				{line: "SharedSecret=e86f3aba843e0de15cacbe173d6eaea830eed88eac4a8d2d", path: "test/vectors.txt"}, // secretscan:allow (fixture)
+				{line: "Key = acc993b3319ddf05b296bacd8b6e16f4", path: "test/kdf.txt"},                            // secretscan:allow (fixture)
+			},
 			reject: []filterCase{{line: `key := crypto.SHA256`, path: "main.go"}, {line: `KeyUsage: KeyUsageCRLSign,`, path: "x509.go"}},
 		},
 		"uuid": {

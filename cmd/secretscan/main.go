@@ -168,6 +168,7 @@ type common struct {
 	exitCode      int
 	minSeverity   string
 	policy        string
+	testFixtures  string
 	defaultPolicy string
 	minConfidence string
 	showSupp      bool
@@ -222,7 +223,8 @@ func bindCommon(fs *flag.FlagSet, c *common, mode string) {
 	fs.Var(redactFlag{&c.redact}, "redact", "mask secrets in output: --redact (100%), --redact=N (percent hidden), --redact=0 to show (default 80)")
 	fs.IntVar(&c.exitCode, "exit-code", 1, "exit code when secrets are found")
 	fs.StringVar(&c.minSeverity, "min-severity", "low", "report and fail only at/above: info|low|medium|high|critical")
-	fs.StringVar(&c.policy, "policy", "", "strict (every finding blocks; default) | balanced (high and medium confidence block; low-confidence findings are listed for review)")
+	fs.StringVar(&c.testFixtures, "test-fixtures", "", "block (default) | review: whether balanced blocks generic values in test/example files")
+	fs.StringVar(&c.policy, "policy", "", "strict (every finding blocks; default) | balanced (high and medium confidence, and generic values in test files, block; weak evidence is listed for review)")
 	fs.StringVar(&c.defaultPolicy, "default-policy", "", "policy to use when neither --policy nor the config sets one (git hooks use balanced)")
 	fs.StringVar(&c.minConfidence, "min-confidence", "low", "hide findings below this confidence: low|medium|high (hidden findings are still counted)")
 	fs.BoolVar(&c.showSupp, "show-suppressed", false, "list every candidate removed by a filter or allowlist, with the reason")
@@ -465,7 +467,7 @@ func runScan(ctx context.Context, mode string, args []string) int {
 			hidden++
 			continue
 		}
-		f.Blocking = detect.Blocks(policy, f.Confidence)
+		f.Blocking = detect.BlocksFinding(policy, resolveTestFixtures(c, rs), f)
 		shown = append(shown, f)
 	}
 	kept = shown
@@ -610,6 +612,16 @@ func runScan(ctx context.Context, mode string, args []string) int {
 
 // resolvePolicy: --policy, then the repo config, then --default-policy
 // (set by git hooks), then strict.
+func resolveTestFixtures(c common, rs *config.Ruleset) string {
+	if c.testFixtures != "" {
+		return c.testFixtures
+	}
+	if rs.TestFixtures != "" {
+		return rs.TestFixtures
+	}
+	return "block"
+}
+
 func resolvePolicy(c common, rs *config.Ruleset) string {
 	for _, p := range []string{c.policy, rs.Policy, c.defaultPolicy} {
 		if p != "" {
@@ -944,12 +956,12 @@ security-sensitive repositories.
 	default:
 		fmt.Print(`
 policy: balanced (unless .secretscan.toml sets one). High- and medium-confidence
-findings block. Low-confidence findings (weak evidence, and generic values in
-test/example files, which are usually fixtures) are printed under
-"Needs review" and do NOT block. On CredData (337 real repositories, labeled
-independently) balanced blocks 17.5% of labeled secrets at 88% precision and
-lists most of the rest, which are test fixtures, for review; strict blocks 68%
-at 85% precision. Run CI with the default strict policy, or reinstall with
+findings block, and so do generic values in test/example files (set
+testFixtures = "review" in .secretscan.toml to list those for review instead).
+Weak evidence (low confidence) is printed under "Needs review" and does NOT
+block. On CredData (337 real repositories, labeled independently) balanced
+blocks 60% of labeled secrets at 92% precision; strict blocks 69% at 85%.
+Run CI with the default strict policy, or reinstall with
 --policy strict to block everything locally.
 `)
 	}
@@ -1147,6 +1159,7 @@ func runTriage(args []string) int {
 	bindCommon(fs, &c, "triage")
 	root := fs.String("root", ".", "directory (or git repository) the report's paths are relative to; files outside it are never read")
 	deleteInput := fs.Bool("delete-input", false, "delete the report file after reading it (even if triage fails)")
+	mode := fs.String("mode", triage.Conservative, "conservative (never filter a value under a credential-named key for its shape alone) | standard (apply every filter)")
 	pos, err := parseInterleaved(fs, args)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -1202,7 +1215,12 @@ func runTriage(args []string) int {
 		return code
 	}
 	policy := resolvePolicy(c, rs)
+	if *mode != triage.Conservative && *mode != triage.Standard {
+		fmt.Fprintf(os.Stderr, "secretscan: --mode must be conservative or standard\n")
+		return exitError
+	}
 	tr := triage.New(det, *root)
+	tr.Mode = *mode
 	var kept, filtered []detect.Finding
 	counts := map[string]int{}
 	// Group by source so the triager keeps only one file in memory at a time.
@@ -1223,7 +1241,7 @@ func runTriage(args []string) int {
 			filtered = append(filtered, f)
 			continue
 		}
-		f.Blocking = detect.Blocks(policy, f.Confidence)
+		f.Blocking = detect.BlocksFinding(policy, resolveTestFixtures(c, rs), f)
 		kept = append(kept, f)
 	}
 	sort.SliceStable(kept, func(i, j int) bool { return kept[i].Blocking && !kept[j].Blocking })

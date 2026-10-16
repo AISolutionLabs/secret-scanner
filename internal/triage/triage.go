@@ -205,11 +205,12 @@ type Triager struct {
 	text  map[string]string
 	why   map[string]string
 	cur   string
+	Mode  string // Conservative (default) or Standard
 }
 
 // New returns a triager.
 func New(det *detect.Detector, root string) *Triager {
-	return &Triager{Det: det, Root: root, cache: map[string]detect.Result{}, text: map[string]string{}, why: map[string]string{}}
+	return &Triager{Det: det, Root: root, Mode: Conservative, cache: map[string]detect.Result{}, text: map[string]string{}, why: map[string]string{}}
 }
 
 const maxSource = 8 << 20
@@ -375,8 +376,13 @@ func (t *Triager) Evaluate(in Input) detect.Finding {
 	}
 	// 2. secretscan saw the candidate and filtered it, with a reason.
 	// Works with partially redacted reports (prefix match).
+	var spared []string
 	for _, s := range res.Suppressed {
 		if near(s.StartLine, in.StartLine) && in.matches(s.Secret) {
+			if t.spare(s.Reason, f.Line, in) {
+				spared = append(spared, s.Reason)
+				break
+			}
 			f.Triage, f.Confidence = Filtered+": "+s.Reason, detect.Low
 			f.Evidence = []string{"secretscan " + s.RuleID + " filtered this value: " + s.Reason}
 			return f
@@ -401,15 +407,83 @@ func (t *Triager) Evaluate(in Input) detect.Finding {
 	if !providerShaped(t.Det, in) {
 		quoted := strings.Contains(f.Line, `"`+in.Secret) || strings.Contains(f.Line, `'`+in.Secret)
 		if why := detect.NoiseReason(in.Secret, quoted, in.File); why != "" {
-			f.Triage, f.Confidence = Filtered+": "+why, detect.Low
-			f.Evidence = []string{"value filter: " + why}
-			return f
+			if !t.spare(why, f.Line, in) {
+				f.Triage, f.Confidence = Filtered+": "+why, detect.Low
+				f.Evidence = []string{"value filter: " + why}
+				return f
+			}
+			if len(spared) == 0 || spared[len(spared)-1] != why {
+				spared = append(spared, why)
+			}
 		}
 	}
 	f.Triage = Uncorroborated
 	f.Evidence = []string{"no secretscan rule corroborates it and no filter explains it (kept for review)"}
+	if len(spared) > 0 {
+		f.Evidence = []string{"conservative mode: assigned to a credential-named key, so the shape-only filter (" +
+			strings.Join(spared, ", ") + ") was not applied (kept for review)"}
+	}
 	return f
 }
+
+// Triage modes.
+const (
+	// Conservative never filters a value only because of its shape when the
+	// line assigns it to a credential-named key (token, secret, password, key,
+	// auth, ...): a UUID or a word-like string can be a real credential.
+	Conservative = "conservative"
+	// Standard applies every filter, as a scan does.
+	Standard = "standard"
+)
+
+// shapeOnly are filters that judge what a value looks like, not where it
+// sits; structural ones (digests, truncation, published examples,
+// placeholders, sequences, templates) always apply, and so does
+// credential-name: a value that names a secret ("prod-db-secret-id") is a
+// reference whatever key holds it.
+var shapeOnly = map[string]bool{
+	"identifier": true, "uuid": true, "word-like": true, "camel-case-identifier": true, "word-tokens": true,
+	"word-segments": true, "dotted-namespace": true, "single-case-letters": true, "digit-free-name-or-path": true,
+	"stopword": true, "operator-in-code": true, "key=value-pair": true, "email-address": true,
+	"allowlist: names that hold identifiers, not secrets": true,
+	"allowlist: value read from env/secret store":         true,
+}
+
+// credentialKey matches the end of "<credential-named key> <operator>" before
+// a value: tokenValue = , "SecretID": , secretVal := , api_key", .
+var credentialKey = regexp.MustCompile(`(?i)(?:secret|token|passw|pwd|passphrase|api[_-]?key|apikey|auth|credential|private[_-]?key|access[_-]?key|key)[a-z0-9_]{0,8}["'\x60]?\s*(?::=|=>|[:=,])\s*["'\x60]?$`)
+
+// spare reports whether conservative mode keeps a value a filter would drop.
+func (t *Triager) spare(reason, line string, in Input) bool {
+	if t.Mode != Conservative || !shapeOnly[reason] {
+		return false
+	}
+	i := strings.Index(line, in.probe())
+	if i < 0 {
+		return false
+	}
+	// Namespaced or snake-case names under a key (crypto.SHA256,
+	// ALICE_secp112r2) remain identifiers even here, and a value that names a
+	// secret (prod-db-secret-id) is a reference, not the secret.
+	if reason == "identifier" && strings.ContainsAny(in.Secret, "._") || secretReference.MatchString(in.Secret) {
+		return false
+	}
+	before := strings.TrimRight(line[max(0, i-80):i], " \t")
+	if !credentialKey.MatchString(before) {
+		return false
+	}
+	// UUIDs under request/correlation-style keys are IDs (request_token,
+	// idempotency_key), unlike access_token = <uuid>.
+	if reason == "uuid" && requestIDKey.MatchString(before) {
+		return false
+	}
+	return true
+}
+
+var (
+	secretReference = regexp.MustCompile(`(?i)(?:^|[_.-])(?:secret|token|password|passwd|key|credentials?)[_.-](?:id|name|ref|path|arn|key)$`)
+	requestIDKey    = regexp.MustCompile(`(?i)(?:request|idempoten|correlation|trace|transaction|session[_-]?id|client[_-]?id|tenant|subscription|object|resource|message)[a-z0-9_-]{0,20}["'\x60]?\s*(?::=|=>|[:=,])\s*["'\x60]?$`)
+)
 
 // providerShaped reports whether any secretscan provider rule matches the
 // bare value; such values are never filtered by generic value heuristics.

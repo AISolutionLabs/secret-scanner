@@ -18,6 +18,28 @@ const (
 	Low    = "low"    // weak evidence, or a generic value in a test/example file: review under balanced
 )
 
+// FixtureCap is the evidence line of a generic value capped at low because
+// it sits in a test/example file.
+const FixtureCap = "capped at low: unstructured value in a test/example file"
+
+// BlocksFinding applies the policy to a finding. testFixtures "block" (the
+// CLI default) makes balanced also block generic values capped at low only for
+// sitting in a test/example file; "review" lists them instead. Provider
+// formats there are high confidence and always block.
+func BlocksFinding(policy, testFixtures string, f Finding) bool {
+	if Blocks(policy, f.Confidence) {
+		return true
+	}
+	if testFixtures == "block" {
+		for _, e := range f.Evidence {
+			if e == FixtureCap {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Blocks reports whether a finding of this confidence blocks under a policy:
 // strict blocks everything; balanced blocks medium and high and lists low
 // (weak evidence, generic values in test/example files) for review. See
@@ -104,7 +126,7 @@ func assess(r *config.CompiledRule, secret string, quoted bool, path string, ent
 		// is most likely a fixture: low, so the balanced policy lists it for
 		// review instead of blocking. (Provider formats returned High above
 		// and are not affected.)
-		return Low, append(ev, "capped at low: unstructured value in a test/example file")
+		return Low, append(ev, FixtureCap)
 	case score >= 4:
 		return High, ev
 	case score == 3:

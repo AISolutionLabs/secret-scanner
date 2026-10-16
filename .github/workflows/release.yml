@@ -3,10 +3,14 @@ on:
   push:
     tags: ["v*"]
 permissions:
-  contents: write
+  contents: read
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write     # create the release
+      id-token: write     # keyless signing (Sigstore) and provenance
+      attestations: write # GitHub build-provenance attestations
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
@@ -16,6 +20,15 @@ jobs:
       - run: make release VERSION=${GITHUB_REF_NAME}
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS
+      # Publisher authentication, not just consistency: SHA256SUMS is signed
+      # with a short-lived Sigstore certificate bound to this workflow, and
+      # every binary gets a build-provenance attestation.
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign SHA256SUMS
+        run: cosign sign-blob --yes --bundle dist/SHA256SUMS.sigstore.json dist/SHA256SUMS
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/secretscan-*
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -36,9 +49,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: install.sh (checksum-verified binary)
+      - uses: sigstore/cosign-installer@v3
+      - name: install.sh (checksum and signature verified)
         run: |
-          BINDIR="$RUNNER_TEMP/bin" sh install.sh "$GITHUB_REF_NAME"
+          BINDIR="$RUNNER_TEMP/bin" SECRETSCAN_REQUIRE_SIGNATURE=1 sh install.sh "$GITHUB_REF_NAME"
           "$RUNNER_TEMP/bin/secretscan" version | grep -qx "secretscan $GITHUB_REF_NAME"
       - name: The installed binary blocks a secret and passes clean code
         run: |
@@ -48,6 +62,13 @@ jobs:
           tok="ghp_$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 36)"
           echo "TOKEN = \"$tok\"" > leak.py
           if "$RUNNER_TEMP/bin/secretscan" dir . -q; then echo "secret not blocked"; exit 1; fi
+      - name: Build provenance verifies
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          os=$(uname -s | tr A-Z a-z); arch=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+          gh release download "$GITHUB_REF_NAME" -p "secretscan-$os-$arch" -D "$RUNNER_TEMP/att"
+          gh attestation verify "$RUNNER_TEMP/att/secretscan-$os-$arch" --repo "$GITHUB_REPOSITORY"
       - uses: actions/setup-go@v5
         with: { go-version: stable }
       - name: go install at the tag

@@ -26,6 +26,7 @@ in the [benchmark](#how-it-is-measured).
           ├── high      → blocks (both policies)
           ├── medium    → blocks (both policies)
           ├── low       → blocks under strict, "review" under balanced
+          │               (generic values in test files: blocks unless testFixtures = "review")
           └── filtered  → not reported, but counted and listable (--show-suppressed)
 ```
 
@@ -49,8 +50,9 @@ independent signals:
 | outside test/example paths | not under `tests/`, `fixtures/`, `examples/`, `docs/`, `*_test.go`, ... |
 
 Four or more signals is **high**, three is **medium**, and fewer is **low**.
-In test or example files, contextual findings are capped at **low**: without
-a provider format, a value there is most likely a fixture.
+In test or example files, contextual findings are capped at **low** and
+marked as such: without a provider format the evidence is weaker. Whether
+they block is a policy setting (below), not a confidence judgement.
 Entropy is one signal among six, never sufficient by itself.
 
 **Location never downgrades a provider format.** A real GitHub token in
@@ -65,19 +67,25 @@ confidence, and one the provider rejects is low.
 | | strict (default for scans and CI) | balanced (default for git hooks) |
 |---|---|---|
 | high / medium confidence | blocks | blocks |
-| low (weak evidence, generic values in test/example files) | blocks | listed under **Needs review**, does not block |
+| generic value in a test/example file | blocks | blocks (`testFixtures = "block"`, default) or **Needs review** (`testFixtures = "review"`) |
+| other low confidence (weak evidence) | blocks | listed under **Needs review**, does not block |
 | filtered as noise | counted, listable | counted, listable |
 
-The trade-off is explicit and measured. Balanced keeps commits moving when
-the evidence is weak or the value sits in a test/example file, at the cost of
-letting such a value through the hook (it is still printed). On the
-regression suite balanced blocks all 529 labeled secrets. On CredData, an
-independent dataset whose labels count credential-shaped test fixtures as
-secrets, balanced blocks 17.5% of them at 88% precision and strict 68% at 85%:
-most CredData secrets are fixtures in test directories, which balanced lists
-for review by design.
-Unstructured values (generic matches) in test/example files are capped at
-medium, since without a provider format they are most likely fixtures.
+The trade-off is measured on CredData (337 real repositories, labeled
+independently):
+
+| Setting | Blocking recall | Blocking precision |
+|---|---|---|
+| strict | 68.7% | 85.0% |
+| balanced (default: `testFixtures = "block"`) | 59.9% | 91.6% |
+| balanced, `testFixtures = "review"` | 17.5% | 88.1% |
+
+Blocking test fixtures raises recall *and* precision on real repositories:
+credential-shaped values in test directories are usually real credentials or
+copies of them. On published packages, whose test suites ship many fake keys,
+it raises blocking findings from 1.85 to 2.69 per 1,000 files. Repositories
+with fixture-heavy tests can choose `review`. On the regression suite balanced
+blocks all 529 labeled secrets.
 Set it per run (`--policy balanced`), per hook
 (`secretscan install-hook --policy strict`) or per repo (`policy = "balanced"`
 in `.secretscan.toml`). Hooks default to balanced because an interrupted
@@ -134,11 +142,35 @@ Each finding becomes one of:
 |---|---|---|
 | verified | the source tool verified it live | yes |
 | confirmed | secretscan independently reports the same secret (its confidence applies) | by policy |
-| uncorroborated | no rule confirms it and no filter explains it | strict: yes; balanced: review |
+| uncorroborated | no rule confirms it and no filter explains it, or conservative mode kept it (below) | strict: yes; balanced: review |
 | filtered: *reason* | identified as noise: inside a digest or longer token, identifier, word-like value, UUID, published example, ... | no, but listed |
 
 Provider-shaped values are never filtered by the generic value heuristics,
 and filtered findings stay in JSON/SARIF output with their reason.
+
+**Conservative mode (default).** Shape-only filters (identifier, UUID,
+word-like, word segments, camel case, operator-in-code, key=value, e-mail,
+and the name allowlists) are not applied to a value assigned to a
+credential-named key, because real credentials take those shapes: UUID
+access tokens, letters-only `.env` values, base64 under `key =`. Exceptions
+that stay filtered: namespaced/snake-case identifiers (`ALICE_secp112r2`),
+values that name a secret (`prod-db-secret-id`), and UUIDs under request-style
+keys (`request_token`, `idempotency_key`). `--mode standard` applies every
+filter.
+
+It was designed on one half of CredData's repositories and measured once on
+the other half, which no change had seen (gitleaks: 1,110 true, 99 false):
+
+| Triage mode | True kept | False kept | Real secrets lost |
+|---|---|---|---|
+| before this release | 980 | 72 | 130 |
+| standard | 987 | 73 | 123 |
+| conservative (default) | 1,095 | 79 | 15 |
+
+The cost is review volume: on published packages gitleaks + triage lists
+5.0 findings per 1,000 files for review instead of 2.1; blocking findings
+under balanced are unchanged (0.97). All 91 issue-derived false positives
+stay filtered.
 
 ## How it is measured
 
@@ -164,7 +196,7 @@ and filtered findings stay in JSON/SARIF output with their reason.
 - **recall safety of filters**: `TestFalseNegativesPerAlphabet` runs 20,000
   random secrets per alphabet (alphanumeric, hex, base64, base64url, base32,
   passwords, lowercase+digits) through the generic pipeline in CI and fails
-  if filters remove more than 0.02% of any alphabet; each filter also has
+  if filters remove more than 0.02% of any alphabet (0.05% for passwords); each filter also has
   keep / reject / borderline cases (`TestFilterAdversarialCases`);
 - **package corpora**: 52 popular npm/PyPI packages (~900 MB) where no live
   secret is expected. Findings there are mostly documentation examples and
@@ -188,11 +220,12 @@ Results are in [bench/results/](../bench/results/2026-10-15.md).
   a regression suite. The independent measurements are CredData (first run)
   and the first leaky-repo run. On CredData secretscan's precision is on par
   with gitleaks (85.0% vs 86.1%), not better; its advantage is recall.
-- On CredData, triage filtered 2.8% of gitleaks' true findings: UUID-shaped
-  tokens under credential keys, letters-only values in `KEY=value` files and
-  pagination tokens are the main causes.
-- Nobody outside the project has reproduced the results yet, and trufflehog
-  has not been run directly.
+- Triage still loses some real secrets: 15 of 1,110 on CredData's holdout
+  half in conservative mode (123 in standard mode), mostly base64-encoded JSON
+  tokens and values under keys it does not recognise as credential names.
+- Nobody outside the project has run `bench/reproduce.sh` yet; the
+  `benchmark` workflow lets anyone do it in a fork.
+- trufflehog has not been run directly.
 - Not detected yet: HTTP `Authorization` headers (Basic, Bearer, NTLM),
   PASETO/PASERK, NKEY seeds, JWKs and OTP secrets (the largest CredData miss
   classes); hex test vectors of consecutive bytes are a false-positive class.

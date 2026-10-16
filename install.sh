@@ -8,6 +8,11 @@
 #   curl -fsSL .../install.sh | BINDIR=/usr/local/bin sh   # another directory
 #
 # Nothing is installed if the download or the checksum check fails.
+#
+# The checksum file is signed by the release workflow with Sigstore (keyless).
+# If cosign is installed the signature is verified too, which authenticates
+# the publisher, not just the download. SECRETSCAN_REQUIRE_SIGNATURE=1 makes
+# the signature check mandatory.
 set -eu
 
 REPO="AISolutionLabs/secret-scanner"
@@ -62,6 +67,21 @@ want="$(awk -v f="$asset" '$2 == f || $2 == "*"f {print $1}' "$tmp/SHA256SUMS")"
 got="$(sha "$tmp/$asset")"
 [ "$want" = "$got" ] || die "checksum mismatch for $asset (want $want, got $got)"
 say "checksum verified"
+
+# Signature on SHA256SUMS: issued to this repository's release workflow for a
+# v* tag, via GitHub's OIDC issuer.
+if command -v cosign >/dev/null 2>&1; then
+  fetch "$base/SHA256SUMS.sigstore.json" "$tmp/SHA256SUMS.sigstore.json" || die "download failed: SHA256SUMS.sigstore.json"
+  cosign verify-blob "$tmp/SHA256SUMS" --bundle "$tmp/SHA256SUMS.sigstore.json" \
+    --certificate-identity-regexp "^https://github.com/$REPO/\.github/workflows/release\.yml@refs/tags/v" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null 2>&1 ||
+    die "signature verification of SHA256SUMS failed"
+  say "signature verified (release workflow of $REPO)"
+elif [ "${SECRETSCAN_REQUIRE_SIGNATURE:-0}" = 1 ]; then
+  die "SECRETSCAN_REQUIRE_SIGNATURE=1 but cosign is not installed"
+else
+  say "note: install cosign to also verify the publisher's signature (see README)"
+fi
 
 mkdir -p "$BINDIR"
 chmod 0755 "$tmp/$asset"

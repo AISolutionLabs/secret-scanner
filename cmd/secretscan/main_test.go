@@ -366,7 +366,7 @@ func TestPoliciesAndLedger(t *testing.T) {
 	if r := run(t, dir, "", "dir", "."); r.code != 1 {
 		t.Errorf("strict should block the ambiguous finding: %+v", r)
 	}
-	r := run(t, dir, "", "dir", ".", "--policy", "balanced")
+	r := run(t, dir, "", "dir", ".", "--policy", "balanced", "--test-fixtures", "review")
 	if r.code != 0 || !strings.Contains(r.stdout, "Needs review") || !strings.Contains(r.stderr, "0 blocking, 1 to review") {
 		t.Errorf("balanced should report but not block:\n%s\n%s", r.stdout, r.stderr)
 	}
@@ -387,7 +387,7 @@ func TestPoliciesAndLedger(t *testing.T) {
 		t.Errorf("high-confidence finding must block under balanced: %+v", r)
 	}
 	// Policy from config.
-	writeFile(t, filepath.Join(dir, ".secretscan.toml"), "policy = \"balanced\"\n")
+	writeFile(t, filepath.Join(dir, ".secretscan.toml"), "policy = \"balanced\"\ntestFixtures = \"review\"\n")
 	os.Remove(filepath.Join(dir, "tests/test_gh.py"))
 	if r := run(t, dir, "", "dir", "."); r.code != 0 {
 		t.Errorf("config policy not applied: %+v", r)
@@ -406,14 +406,21 @@ func TestBalancedHook(t *testing.T) {
 		t.Fatal(out)
 	}
 	// Hooks default to balanced (no --policy needed) and say so.
-	if r := run(t, repo, "", "install-hook"); r.code != 0 || !strings.Contains(r.stdout, "policy: balanced") || !strings.Contains(r.stdout, "do NOT") {
+	if r := run(t, repo, "", "install-hook"); r.code != 0 || !strings.Contains(r.stdout, "policy: balanced") || !strings.Contains(r.stdout, "does NOT") {
 		t.Fatalf("install: %+v", r)
 	}
+	// By default balanced also blocks generic values in test files...
 	writeFile(t, filepath.Join(repo, "tests/test_cfg.py"), "client_secret = \"Zq7wPv2kLm9xR4\"\n")
+	gitCmd(t, repo, "add", ".")
+	if out, err := gitCmd(t, repo, "commit", "-qm", "fixture"); err == nil {
+		t.Fatalf("balanced hook should block a generic value in a test file by default:\n%s", out)
+	}
+	// ...and a repository can make them review-only.
+	writeFile(t, filepath.Join(repo, ".secretscan.toml"), "testFixtures = \"review\"\n")
 	gitCmd(t, repo, "add", ".")
 	out, err := gitCmd(t, repo, "commit", "-qm", "ambiguous")
 	if err != nil || !strings.Contains(out, "Needs review") {
-		t.Fatalf("balanced hook should let the commit through with a review note: %v\n%s", err, out)
+		t.Fatalf("with testFixtures = review the commit goes through with a review note: %v\n%s", err, out)
 	}
 	writeFile(t, filepath.Join(repo, "app.py"), "GH = \""+pat()+"\"\n")
 	gitCmd(t, repo, "add", ".")
@@ -537,5 +544,31 @@ func TestReportPermissionsAreTightened(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(rp); !strings.HasPrefix(strings.TrimSpace(string(b)), "[") {
 		t.Errorf("report not rewritten: %q", b)
+	}
+}
+
+// Under balanced, generic values in test files block unless the repository
+// sets testFixtures = "review"; provider formats in test files always block.
+func TestTestFixturesPolicy(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "tests/test_cfg.py"), "client_secret = \"Zq7wPv2kLm9xR4tY8uB3\"\n")
+	if r := run(t, dir, "", "dir", ".", "--policy", "balanced", "-q"); r.code != 1 {
+		t.Fatalf("balanced blocks a generic value in a test file by default: %+v", r)
+	}
+	if r := run(t, dir, "", "dir", ".", "--policy", "balanced", "--test-fixtures", "review", "-q"); r.code != 0 {
+		t.Fatalf("--test-fixtures review should make it review-only: %+v", r)
+	}
+	writeFile(t, filepath.Join(dir, ".secretscan.toml"), "policy = \"balanced\"\ntestFixtures = \"review\"\n")
+	if r := run(t, dir, "", "dir", ".", "-q"); r.code != 0 {
+		t.Fatalf("testFixtures in config should make it review-only: %+v", r)
+	}
+	writeFile(t, filepath.Join(dir, ".secretscan.toml"), "testFixtures = \"sometimes\"\n")
+	if r := run(t, dir, "", "dir", ".", "-q"); r.code != 2 {
+		t.Fatalf("invalid testFixtures should be a config error: %+v", r)
+	}
+	os.Remove(filepath.Join(dir, ".secretscan.toml"))
+	writeFile(t, filepath.Join(dir, "tests/test_cfg.py"), "GH = \""+pat()+"\"\n")
+	if r := run(t, dir, "", "dir", ".", "--policy", "balanced", "-q"); r.code != 1 {
+		t.Fatalf("a provider token in a test file must block under balanced: %+v", r)
 	}
 }

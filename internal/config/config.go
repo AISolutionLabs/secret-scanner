@@ -31,6 +31,10 @@ type Config struct {
 	// Policy decides what blocks: "strict" (every finding) or "balanced"
 	// (high and medium confidence; low-confidence findings are reported for review).
 	Policy string `json:"policy"`
+	// TestFixtures decides whether balanced blocks generic values in
+	// test/example files: "block" (default) or "review". Provider-format
+	// secrets in test files always block.
+	TestFixtures string `json:"testFixtures"`
 }
 
 // Remediation sets organization defaults for fix guidance.
@@ -259,7 +263,10 @@ func loadWithExtends(path string, depth int) (*Config, []string, error) {
 // by top's version; allowlists accumulate.
 func merge(base, top *Config) *Config {
 	out := &Config{Title: top.Title, Description: top.Description, Extend: top.Extend, Remediation: base.Remediation}
-	out.Policy = base.Policy
+	out.Policy, out.TestFixtures = base.Policy, base.TestFixtures
+	if top.TestFixtures != "" {
+		out.TestFixtures = top.TestFixtures
+	}
 	if top.Policy != "" {
 		out.Policy = top.Policy
 	}
@@ -432,21 +439,27 @@ type CompiledAllowlist struct {
 
 // Ruleset is a compiled config.
 type Ruleset struct {
-	Rules       []*CompiledRule
-	Allowlists  []*CompiledAllowlist // global
-	Remediation Remediation
-	Policy      string
+	Rules        []*CompiledRule
+	Allowlists   []*CompiledAllowlist // global
+	Remediation  Remediation
+	Policy       string
+	TestFixtures string
 }
 
 // Compile validates and compiles a resolved config.
 func Compile(c *Config) (*Ruleset, error) {
-	rs := &Ruleset{Remediation: c.Remediation, Policy: c.Policy}
+	rs := &Ruleset{Remediation: c.Remediation, Policy: c.Policy, TestFixtures: c.TestFixtures}
 	seen := map[string]bool{}
 	var errs []string
 	switch c.Policy {
 	case "", "strict", "balanced":
 	default:
 		errs = append(errs, fmt.Sprintf("policy %q: want strict or balanced", c.Policy))
+	}
+	switch c.TestFixtures {
+	case "", "review", "block":
+	default:
+		errs = append(errs, fmt.Sprintf("testFixtures %q: want review or block", c.TestFixtures))
 	}
 	for _, r := range c.Rules {
 		cr, err := compileRule(r)
