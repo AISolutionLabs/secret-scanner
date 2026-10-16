@@ -223,45 +223,36 @@ func (t *Triager) resolve(file string) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	realRoot := root
-	if r, err := filepath.EvalSymlinks(root); err == nil {
-		realRoot = r
-	}
+	realRoot := realPath(root)
 	p := filepath.FromSlash(file)
 	if !filepath.IsAbs(p) {
 		p = filepath.Join(root, p)
 	}
 	p = filepath.Clean(p)
-	inside := func(base, x string) (string, bool) {
-		rel, err := filepath.Rel(base, x)
-		return rel, err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+	// Containment is decided on resolved paths, so every spelling of the
+	// root works (/var vs /private/var on macOS) and no symlink, on the file
+	// or any directory above it, can lead outside --root.
+	rel, err := filepath.Rel(realRoot, realPath(p))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", "", fmt.Errorf("path outside --root (after resolving symlinks)")
 	}
-	// Lexically inside --root, as given or as resolved (an absolute report
-	// path may be spelled either way, e.g. /var vs /private/var on macOS).
-	rel, ok := inside(root, p)
-	if !ok {
-		if rel, ok = inside(realRoot, p); !ok {
-			return "", "", fmt.Errorf("path outside --root")
-		}
-	}
-	// Then resolve symlinks on the deepest existing ancestor: neither the
-	// file nor any directory on the way may lead outside --root, even when
-	// the file itself does not exist yet.
+	return p, filepath.ToSlash(rel), nil
+}
+
+// realPath resolves symlinks on the deepest existing ancestor of p and
+// appends the rest, so a file that does not exist yet still resolves.
+func realPath(p string) string {
 	for dir, rest := p, ""; ; {
 		if real, err := filepath.EvalSymlinks(dir); err == nil {
-			if _, ok := inside(realRoot, filepath.Join(real, rest)); !ok {
-				return "", "", fmt.Errorf("symlink resolves outside --root")
-			}
-			break
+			return filepath.Join(real, rest)
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			break
+			return p
 		}
 		rest = filepath.Join(filepath.Base(dir), rest)
 		dir = parent
 	}
-	return p, filepath.ToSlash(rel), nil
 }
 
 // source loads the file content the finding refers to. A finding from a
