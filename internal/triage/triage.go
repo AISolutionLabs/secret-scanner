@@ -184,6 +184,19 @@ func nonEmpty(s, def string) string {
 	return s
 }
 
+// focus drops cached sources other than key. Callers that group findings by
+// file (the CLI sorts them) read each file once and hold one at a time,
+// however large the report.
+func (t *Triager) focus(key string) {
+	if t.cur == key {
+		return
+	}
+	t.cur = key
+	clear(t.cache)
+	clear(t.text)
+	clear(t.why)
+}
+
 // Triager re-scores findings against source files under Root.
 type Triager struct {
 	Det   *detect.Detector // must have RecordSuppressed set
@@ -191,12 +204,15 @@ type Triager struct {
 	cache map[string]detect.Result
 	text  map[string]string
 	why   map[string]string
+	cur   string
 }
 
 // New returns a triager.
 func New(det *detect.Detector, root string) *Triager {
 	return &Triager{Det: det, Root: root, cache: map[string]detect.Result{}, text: map[string]string{}, why: map[string]string{}}
 }
+
+const maxSource = 8 << 20
 
 var commitRe = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
 
@@ -223,10 +239,21 @@ func (t *Triager) resolve(file string) (string, string, error) {
 	if !ok {
 		return "", "", fmt.Errorf("path outside --root")
 	}
-	if real, err := filepath.EvalSymlinks(p); err == nil {
-		if _, ok := inside(real); !ok {
-			return "", "", fmt.Errorf("symlink resolves outside --root")
+	// Resolve symlinks on the deepest existing ancestor too: a missing file
+	// under a symlinked directory must not escape the check.
+	for dir, rest := p, ""; ; {
+		if real, err := filepath.EvalSymlinks(dir); err == nil {
+			if _, ok := inside(filepath.Join(real, rest)); !ok {
+				return "", "", fmt.Errorf("symlink resolves outside --root")
+			}
+			break
 		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		rest = filepath.Join(filepath.Base(dir), rest)
+		dir = parent
 	}
 	return p, filepath.ToSlash(rel), nil
 }
@@ -236,6 +263,7 @@ func (t *Triager) resolve(file string) (string, string, error) {
 // be read, the finding stays uncorroborated (no working-tree substitution).
 func (t *Triager) source(in Input) (string, string) {
 	key := in.Commit + "\x00" + in.File
+	t.focus(key)
 	if s, ok := t.text[key]; ok {
 		return s, t.why[key]
 	}
@@ -251,9 +279,14 @@ func (t *Triager) source(in Input) (string, string) {
 		if !commitRe.MatchString(in.Commit) {
 			return set("", "invalid commit id in report")
 		}
-		out, err := exec.Command("git", "-C", t.Root, "show", "--no-textconv", in.Commit+":"+rel).Output()
+		// "./" makes the path relative to --root rather than to the top of the
+		// repository, so --root on a subdirectory reads the right file.
+		out, err := exec.Command("git", "-C", t.Root, "show", "--no-textconv", in.Commit+":./"+rel).Output()
 		if err != nil {
 			return set("", "source at commit "+in.Commit[:min(10, len(in.Commit))]+" unavailable (no working-tree substitution)")
+		}
+		if len(out) > maxSource {
+			return set("", "source file too large to re-check")
 		}
 		return set(string(out), "")
 	}
@@ -261,7 +294,7 @@ func (t *Triager) source(in Input) (string, string) {
 	if err != nil {
 		return set("", "source file unreadable")
 	}
-	if len(b) > 8<<20 {
+	if len(b) > maxSource {
 		return set("", "source file too large to re-check")
 	}
 	return set(string(b), "")
@@ -307,7 +340,7 @@ func near(a, b int) bool { return a == b || a == b-1 || a == b+1 || b == 0 }
 func (t *Triager) Evaluate(in Input) detect.Finding {
 	f := detect.Finding{RuleID: in.RuleID, Description: in.Tool + " " + in.RuleID, Severity: "high", File: in.File,
 		StartLine: in.StartLine, EndLine: max(in.StartLine, in.EndLine), Secret: in.Secret, Match: in.Match, Commit: in.Commit,
-		Source: in.Tool, Confidence: detect.Medium}
+		Source: in.Tool, Confidence: detect.Low} // uncorroborated: review under balanced, blocks under strict
 	f.Fingerprint = detect.Fingerprint(f)
 	if in.Verified {
 		f.Triage, f.Confidence = Verified, detect.High

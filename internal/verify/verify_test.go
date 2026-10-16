@@ -54,3 +54,29 @@ func TestVerifierStatuses(t *testing.T) {
 		}
 	}
 }
+
+// A provider endpoint that redirects must not receive a second request
+// elsewhere carrying the secret in a custom header.
+func TestVerifierNeverFollowsRedirects(t *testing.T) {
+	leaked := false
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaked = r.Header.Get("X-Api-Key") != ""
+		w.WriteHeader(200)
+	}))
+	defer elsewhere.Close()
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL, http.StatusFound)
+	}))
+	defer provider.Close()
+	saved := Checks
+	defer func() { Checks = saved }()
+	Checks = map[string]Check{"k": {Method: "GET", URL: provider.URL, Header: func(s string) http.Header { return http.Header{"X-Api-Key": {s}} }}}
+	fs := []detect.Finding{{RuleID: "k", Secret: "live", SecretHash: "1"}}
+	New().Run(context.Background(), fs, 1)
+	if leaked {
+		t.Fatal("secret was forwarded to the redirect target")
+	}
+	if fs[0].Verification != Unknown {
+		t.Errorf("redirect answer = %s, want %s", fs[0].Verification, Unknown)
+	}
+}

@@ -5,3 +5,4 @@ secretscan-report.*
 *.test
 *.out
 bench/work/
+__pycache__/

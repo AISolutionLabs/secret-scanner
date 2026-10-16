@@ -94,6 +94,11 @@ func slackOK(status int, body []byte) string {
 	return Unknown
 }
 
+// noRedirects keeps a secret on the provider endpoint it was meant for: on a
+// cross-host redirect Go drops Authorization but forwards custom headers
+// (x-api-key, DD-API-KEY, ...). A redirect answer is reported as unknown.
+func noRedirects(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
 // Verifier runs checks with caching and bounded concurrency.
 type Verifier struct {
 	Client  *http.Client
@@ -104,7 +109,7 @@ type Verifier struct {
 
 // New returns a verifier honoring HTTPS_PROXY and the system CA store.
 func New() *Verifier {
-	return &Verifier{Client: &http.Client{Timeout: 15 * time.Second}, Timeout: 10 * time.Second, cache: map[string]string{}}
+	return &Verifier{Client: &http.Client{Timeout: 15 * time.Second, CheckRedirect: noRedirects}, Timeout: 10 * time.Second, cache: map[string]string{}}
 }
 
 // Status verifies a single finding (raw, un-redacted secret required).

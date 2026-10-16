@@ -29,7 +29,7 @@ type Config struct {
 	Allowlists  []Allowlist `json:"allowlists"` // global allowlists
 	Remediation Remediation `json:"remediation"`
 	// Policy decides what blocks: "strict" (every finding) or "balanced"
-	// (only high-confidence findings; the rest are reported for review).
+	// (high and medium confidence; low-confidence findings are reported for review).
 	Policy string `json:"policy"`
 }
 

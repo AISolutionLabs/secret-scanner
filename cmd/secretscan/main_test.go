@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -516,5 +517,25 @@ func TestStatsReportIsAnonymous(t *testing.T) {
 		if strings.Contains(r.stdout, leak) {
 			t.Errorf("stats output leaks %q:\n%s", leak, r.stdout)
 		}
+	}
+}
+
+// Writing a report over an existing, world-readable file must not keep the
+// old permissions: the report contains secrets (with --redact=0).
+func TestReportPermissionsAreTightened(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permissions")
+	}
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "app.py"), "GH = \""+pat()+"\"\n")
+	rp := filepath.Join(t.TempDir(), "report.json")
+	os.WriteFile(rp, []byte("old"), 0o644)
+	run(t, dir, "", "dir", ".", "-r", rp, "--redact=0", "-q")
+	fi, err := os.Stat(rp)
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("report mode = %v (%v), want 0600", fi.Mode().Perm(), err)
+	}
+	if b, _ := os.ReadFile(rp); !strings.HasPrefix(strings.TrimSpace(string(b)), "[") {
+		t.Errorf("report not rewritten: %q", b)
 	}
 }

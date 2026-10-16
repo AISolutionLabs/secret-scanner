@@ -162,10 +162,11 @@ func TestCorpusDerivedNoise(t *testing.T) {
 			t.Errorf("%s: %v %q", path, ids(fs), fs[0].Secret)
 		}
 	}
-	// Unstructured random values in fixtures are capped at medium; provider formats are not.
+	// Unstructured random values in fixtures are capped at low (review under
+	// balanced); provider formats are not.
 	f := findingFor(d.Detect(detect.Fragment{Raw: `encryption_key = "` + g(hexs, 32) + `"`, FilePath: "tests/unit/test_blob.py"}), "generic-api-key")
-	if f == nil || f.Confidence != detect.Medium {
-		t.Errorf("fixture generic should be medium: %+v", f)
+	if f == nil || f.Confidence != detect.Low {
+		t.Errorf("fixture generic should be low: %+v", f)
 	}
 	for _, p := range []string{"examples-1.json", "login-provider-test-cases.json", "fake_credentials.py"} {
 		if !detect.IsTestPath("data/" + p) {

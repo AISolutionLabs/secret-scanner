@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -33,7 +34,19 @@ import (
 	"github.com/AISolutionLabs/secret-scanner/internal/verify"
 )
 
-var version = "1.0.0"
+// version is set by -ldflags in release builds; otherwise it comes from the
+// module version embedded by `go install ...@vX.Y.Z`.
+var version = ""
+
+func init() {
+	if version != "" {
+		return
+	}
+	version = "devel"
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		version = bi.Main.Version
+	}
+}
 
 const (
 	exitOK    = 0
@@ -209,7 +222,7 @@ func bindCommon(fs *flag.FlagSet, c *common, mode string) {
 	fs.Var(redactFlag{&c.redact}, "redact", "mask secrets in output: --redact (100%), --redact=N (percent hidden), --redact=0 to show (default 80)")
 	fs.IntVar(&c.exitCode, "exit-code", 1, "exit code when secrets are found")
 	fs.StringVar(&c.minSeverity, "min-severity", "low", "report and fail only at/above: info|low|medium|high|critical")
-	fs.StringVar(&c.policy, "policy", "", "strict (every finding blocks; default) | balanced (only high-confidence findings block, the rest are listed for review)")
+	fs.StringVar(&c.policy, "policy", "", "strict (every finding blocks; default) | balanced (high and medium confidence block; low-confidence findings are listed for review)")
 	fs.StringVar(&c.defaultPolicy, "default-policy", "", "policy to use when neither --policy nor the config sets one (git hooks use balanced)")
 	fs.StringVar(&c.minConfidence, "min-confidence", "low", "hide findings below this confidence: low|medium|high (hidden findings are still counted)")
 	fs.BoolVar(&c.showSupp, "show-suppressed", false, "list every candidate removed by a filter or allowlist, with the reason")
@@ -452,7 +465,7 @@ func runScan(ctx context.Context, mode string, args []string) int {
 			hidden++
 			continue
 		}
-		f.Blocking = policy == "strict" || f.Confidence == detect.High
+		f.Blocking = detect.Blocks(policy, f.Confidence)
 		shown = append(shown, f)
 	}
 	kept = shown
@@ -531,7 +544,7 @@ func runScan(ctx context.Context, mode string, args []string) int {
 	}
 	color := !c.noColor && os.Getenv("NO_COLOR") == "" && isTerminal(os.Stdout)
 	if c.reportPath != "" {
-		out, err := os.OpenFile(c.reportPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+		out, err := createPrivate(c.reportPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "secretscan: %v\n", err)
 			return exitError
@@ -930,12 +943,14 @@ security-sensitive repositories.
 `)
 	default:
 		fmt.Print(`
-policy: balanced (unless .secretscan.toml sets one). High-confidence findings
-(provider token formats, verified secrets, strong generic matches) block.
-Medium/low-confidence findings are printed under "Needs review" and do NOT
-block. On the project's benchmark that lets 1 of 529 labeled secrets through
-the hook (still printed). Run CI with the default strict policy, or reinstall
-with --policy strict to block everything locally.
+policy: balanced (unless .secretscan.toml sets one). High- and medium-confidence
+findings block. Low-confidence findings (weak evidence, and generic values in
+test/example files, which are usually fixtures) are printed under
+"Needs review" and do NOT block. On CredData (337 real repositories, labeled
+independently) balanced blocks 17.5% of labeled secrets at 88% precision and
+lists most of the rest, which are test fixtures, for review; strict blocks 68%
+at 85% precision. Run CI with the default strict policy, or reinstall with
+--policy strict to block everything locally.
 `)
 	}
 	return exitOK
@@ -961,7 +976,7 @@ func applyFixes(patchPath string, inPlace, yes bool, root string, fs []detect.Fi
 	var b strings.Builder
 	if patchPath != "" {
 		// The diff's "-" lines contain the original secrets.
-		if err := os.WriteFile(patchPath, []byte(res.Diff), 0o600); err != nil {
+		if err := writePrivate(patchPath, []byte(res.Diff)); err != nil {
 			return "", err
 		}
 		fmt.Fprintf(&b, "secretscan: fix patch: %d literal(s) -> %s (apply from %s: git apply %s)\n", len(res.Patched), patchPath, root, patchPath)
@@ -1095,6 +1110,37 @@ func runExplain(args []string) int {
 
 // runTriage re-scores another scanner's findings with secretscan's context
 // analysis. Filtered findings are listed with their reason, never dropped.
+// createPrivate opens a file for secrets-bearing output with mode 0600. An
+// existing file keeps its mode under O_CREATE, so it is tightened explicitly
+// before anything is written.
+func createPrivate(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := f.Chmod(0o600); err != nil && runtime.GOOS != "windows" {
+		f.Close()
+		return nil, fmt.Errorf("cannot restrict permissions of %s: %w", path, err)
+	}
+	if err := f.Truncate(0); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+func writePrivate(path string, b []byte) error {
+	f, err := createPrivate(path)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
 func runTriage(args []string) int {
 	fs := flag.NewFlagSet("secretscan triage", flag.ContinueOnError)
 	var c common
@@ -1159,6 +1205,13 @@ func runTriage(args []string) int {
 	tr := triage.New(det, *root)
 	var kept, filtered []detect.Finding
 	counts := map[string]int{}
+	// Group by source so the triager keeps only one file in memory at a time.
+	sort.SliceStable(inputs, func(i, j int) bool {
+		if inputs[i].Commit != inputs[j].Commit {
+			return inputs[i].Commit < inputs[j].Commit
+		}
+		return inputs[i].File < inputs[j].File
+	})
 	for _, in := range inputs {
 		f := tr.Evaluate(in)
 		status := f.Triage
@@ -1170,7 +1223,7 @@ func runTriage(args []string) int {
 			filtered = append(filtered, f)
 			continue
 		}
-		f.Blocking = policy == "strict" || f.Confidence == detect.High
+		f.Blocking = detect.Blocks(policy, f.Confidence)
 		kept = append(kept, f)
 	}
 	sort.SliceStable(kept, func(i, j int) bool { return kept[i].Blocking && !kept[j].Blocking })
@@ -1184,7 +1237,7 @@ func runTriage(args []string) int {
 	color := !c.noColor && os.Getenv("NO_COLOR") == "" && isTerminal(os.Stdout)
 	out := io.Writer(os.Stdout)
 	if c.reportPath != "" {
-		fh, err := os.OpenFile(c.reportPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+		fh, err := createPrivate(c.reportPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "secretscan: %v\n", err)
 			return exitError

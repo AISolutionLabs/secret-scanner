@@ -44,7 +44,7 @@ def run_gitleaks(root):
 
 def run_detect_secrets(root):
     t = time.time()
-    p = subprocess.run(["detect-secrets", "scan", "--all-files", "."], cwd=root, capture_output=True, text=True)
+    p = subprocess.run(["detect-secrets", "scan", "--no-verify", "--all-files", "."], cwd=root, capture_output=True, text=True)
     dt = time.time() - t
     res = []
     for f, items in json.loads(p.stdout)["results"].items():

@@ -14,9 +14,17 @@ import (
 // evidence; no single signal (in particular entropy) is enough on its own.
 const (
 	High   = "high"   // block: provider-specific format, or several independent signals
-	Medium = "medium" // probably a secret, but context is ambiguous: review
-	Low    = "low"    // weak evidence: review
+	Medium = "medium" // probably a secret; blocks under balanced too
+	Low    = "low"    // weak evidence, or a generic value in a test/example file: review under balanced
 )
+
+// Blocks reports whether a finding of this confidence blocks under a policy:
+// strict blocks everything; balanced blocks medium and high and lists low
+// (weak evidence, generic values in test/example files) for review. See
+// bench/results for the measured trade-off.
+func Blocks(policy, confidence string) bool {
+	return policy != "balanced" || ConfidenceRank(confidence) >= ConfidenceRank(Medium)
+}
 
 // ConfidenceRank orders confidence levels; unknown values rank lowest.
 func ConfidenceRank(c string) int {
@@ -91,11 +99,12 @@ func assess(r *config.CompiledRule, secret string, quoted bool, path string, ent
 		ev = append(ev, "in a test/example path (no downgrade for provider formats)")
 	}
 	switch {
-	case score >= 4 && IsTestPath(path):
+	case score >= 3 && IsTestPath(path):
 		// A value without a provider-specific format in a test/example file
-		// is most likely a fixture: never more than medium. (Provider
-		// formats returned High above and are not affected.)
-		return Medium, append(ev, "capped at medium: unstructured value in a test/example file")
+		// is most likely a fixture: low, so the balanced policy lists it for
+		// review instead of blocking. (Provider formats returned High above
+		// and are not affected.)
+		return Low, append(ev, "capped at low: unstructured value in a test/example file")
 	case score >= 4:
 		return High, ev
 	case score == 3:

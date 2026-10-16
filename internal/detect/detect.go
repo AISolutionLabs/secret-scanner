@@ -65,7 +65,7 @@ type Finding struct {
 	Confidence string   `json:"Confidence"`
 	Evidence   []string `json:"Evidence,omitempty"`
 	// Blocking is set by the policy: strict blocks every finding, balanced
-	// blocks high confidence and reports the rest for review.
+	// blocks high and medium confidence and reports low for review.
 	Blocking bool `json:"Blocking"`
 	// Source and Triage are set when re-scoring another scanner's report.
 	Source string `json:"Source,omitempty"`

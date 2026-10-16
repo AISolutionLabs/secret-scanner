@@ -35,8 +35,16 @@ safety, release hygiene):
 - Git hooks (installed and pre-commit framework) default to the **balanced**
   policy; scans and CI still default to strict. `install-hook` prints the
   trade-off, and hooks explain every blocked finding.
+- Balanced now blocks **high and medium** confidence (before: high only) and
+  lists low for review. Generic values in test/example files are capped at
+  low (before: medium), so fixtures still don't block. On CredData this raises
+  balanced's blocking recall from 14.4% to 17.5%; strict is unchanged.
+- Triage's *uncorroborated* findings are low confidence (review under
+  balanced, blocking under strict), as documented.
 
 ### Triage
+- Memory is bounded: findings are processed grouped by file with one file
+  held at a time (8,350 gitleaks findings over 1 GB: 13 s, 203 MB).
 - Source is read only inside `--root`; absolute paths, `../` and escaping
   symlinks are rejected. History findings are read at their commit with no
   working-tree fallback; unavailable or changed source stays uncorroborated.
@@ -50,8 +58,30 @@ safety, release hygiene):
   skipped if they would not parse; literals nested in other strings are never
   rewritten; output always reminds you to rotate.
 
+### Security audit fixes ([docs/security-audit.md](https://github.com/AISolutionLabs/secret-scanner/blob/v1.0.0/docs/security-audit.md))
+- Triage read the wrong file at a commit when `--root` was a subdirectory.
+- Triage symlink containment now also covers files that don't exist yet.
+- Reports and `--fix-patch` files are forced to 0600 even when overwriting.
+- `--verify` no longer follows redirects (custom auth headers could be
+  forwarded to the redirect target).
+- `--fix` replacements fail fast naming the variable (JS/TS, Java, C#) and
+  skip literals that must stay compile-time constants.
+
+### Distribution
+- `install.sh`: one-command install of the release binary with SHA-256
+  verification; refuses to install on a mismatch.
+- The release workflow installs every published release from scratch on
+  Linux and macOS (install script, `go install @tag`, pre-commit hook) and
+  checks it blocks a generated token.
+- `secretscan version` reports the module version for `go install` builds.
+
 ### Reporting and benchmarks
 - `-f stats`: anonymized counts (rule, confidence, file type) for sharing.
+- `bench/creddata.py`: independent precision challenge on Samsung CredData
+  (337 real repositories), including gitleaks + triage; first-run results
+  published with every false-positive and miss class.
+- detect-secrets runs in all benchmarks with `--no-verify` (by default it
+  sends matched values to provider APIs).
 - `bench/leaky_repo.py` (independent ground truth), `bench/adjudicate.py` with
   hand labels for every corpus finding, pinned corpus versions, per-alphabet
   false-negative measurement, and dated results in `bench/results/`.

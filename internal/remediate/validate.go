@@ -58,12 +58,12 @@ func lastLine(s string) string {
 // Caveats are semantic notes about the env-lookup replacement per language.
 var Caveats = map[string]string{
 	"go":         `os.Getenv returns "" when the variable is unset; validate required values at startup`,
-	"javascript": "process.env.X is undefined when unset; validate required values at startup",
-	"typescript": "the replacement uses a non-null assertion (!); validate required values at startup",
-	"python":     `os.environ["X"] raises KeyError at import time when unset (fail-fast)`,
-	"java":       "System.getenv returns null when unset",
-	"csharp":     "Environment.GetEnvironmentVariable returns null when unset",
+	"javascript": "the lookup throws \"X is not set\" when the variable is unset (fail-fast)",
+	"typescript": "the lookup throws \"X is not set\" when the variable is unset (fail-fast)",
+	"python":     `os.environ["X"] raises KeyError when unset (fail-fast); module-level lookups fail at import`,
+	"java":       "Objects.requireNonNull throws \"X is not set\" when unset (fail-fast); static fields fail at class load",
+	"csharp":     "the lookup throws InvalidOperationException when unset (fail-fast)",
 	"ruby":       "ENV.fetch raises KeyError when unset (fail-fast)",
-	"php":        "getenv returns false when unset",
+	"php":        "getenv returns false when unset; validate required values at startup",
 	"shell":      `"${X:?}" aborts the script when X is unset (fail-fast)`,
 }

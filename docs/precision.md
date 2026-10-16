@@ -24,7 +24,7 @@ in the [benchmark](#how-it-is-measured).
                            named reason; every filtered candidate goes to a ledger
           │
           ├── high      → blocks (both policies)
-          ├── medium    → blocks under strict, "review" under balanced
+          ├── medium    → blocks (both policies)
           ├── low       → blocks under strict, "review" under balanced
           └── filtered  → not reported, but counted and listable (--show-suppressed)
 ```
@@ -49,7 +49,8 @@ independent signals:
 | outside test/example paths | not under `tests/`, `fixtures/`, `examples/`, `docs/`, `*_test.go`, ... |
 
 Four or more signals is **high**, three is **medium**, and fewer is **low**.
-In test or example files, contextual findings are capped at **medium**.
+In test or example files, contextual findings are capped at **low**: without
+a provider format, a value there is most likely a fixture.
 Entropy is one signal among six, never sufficient by itself.
 
 **Location never downgrades a provider format.** A real GitHub token in
@@ -63,13 +64,18 @@ confidence, and one the provider rejects is low.
 
 | | strict (default for scans and CI) | balanced (default for git hooks) |
 |---|---|---|
-| high confidence | blocks | blocks |
-| medium / low | blocks | listed under **Needs review**, does not block |
+| high / medium confidence | blocks | blocks |
+| low (weak evidence, generic values in test/example files) | blocks | listed under **Needs review**, does not block |
 | filtered as noise | counted, listable | counted, listable |
 
-The trade-off is explicit. Balanced keeps commits moving when the evidence is
-ambiguous, at the cost of letting a medium-confidence real secret through the
-hook (it is still printed). On the benchmark that is 1 of 529 labeled secrets.
+The trade-off is explicit and measured. Balanced keeps commits moving when
+the evidence is weak or the value sits in a test/example file, at the cost of
+letting such a value through the hook (it is still printed). On the
+regression suite balanced blocks all 529 labeled secrets. On CredData, an
+independent dataset whose labels count credential-shaped test fixtures as
+secrets, balanced blocks 17.5% of them at 88% precision and strict 68% at 85%:
+most CredData secrets are fixtures in test directories, which balanced lists
+for review by design.
 Unstructured values (generic matches) in test/example files are capped at
 medium, since without a provider format they are most likely fixtures.
 Set it per run (`--policy balanced`), per hook
@@ -166,6 +172,8 @@ and filtered findings stay in JSON/SARIF output with their reason.
 - **latency**: p50/p95 wall time of a staged-changes scan over 60 synthetic
   commits.
 
+- **independent precision challenge**: [Samsung CredData](https://github.com/Samsung/CredData),
+  337 real repositories with labeled credential lines (`bench/creddata.py`);
 - **independent ground truth**: [leaky-repo](https://github.com/Plazmaz/leaky-repo),
   scored with its own labels and method (`bench/leaky_repo.py`);
 - **adjudication**: every corpus finding is labeled by hand as
@@ -177,10 +185,17 @@ Results are in [bench/results/](../bench/results/2026-10-15.md).
 ## Limitations
 
 - The labeled secrets and the issue set are this project's own; they are
-  a regression suite. The only independent measurement is the first
-  leaky-repo run, and leaky-repo is small (96 risk lines).
+  a regression suite. The independent measurements are CredData (first run)
+  and the first leaky-repo run. On CredData secretscan's precision is on par
+  with gitleaks (85.0% vs 86.1%), not better; its advantage is recall.
+- On CredData, triage filtered 2.8% of gitleaks' true findings: UUID-shaped
+  tokens under credential keys, letters-only values in `KEY=value` files and
+  pagination tokens are the main causes.
 - Nobody outside the project has reproduced the results yet, and trufflehog
   has not been run directly.
+- Not detected yet: HTTP `Authorization` headers (Basic, Bearer, NTLM),
+  PASETO/PASERK, NKEY seeds, JWKs and OTP secrets (the largest CredData miss
+  classes); hex test vectors of consecutive bytes are a false-positive class.
 - Filters are heuristics. Known gaps, pinned as "borderline" tests:
   passphrases made only of dictionary words under a generic key, UUID-shaped
   secrets without a provider rule, a literal placeholder word used as a real

@@ -4,6 +4,9 @@ package remediate
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -42,16 +45,70 @@ func appendUnique(xs []string, x string) []string {
 
 // patchable languages: literal -> expression, plus an optional import.
 var patchExpr = map[string]func(env string) string{
-	"python":     func(e string) string { return `os.environ["` + e + `"]` },
-	"go":         func(e string) string { return `os.Getenv("` + e + `")` },
-	"javascript": func(e string) string { return `process.env.` + e },
-	"typescript": func(e string) string { return `process.env.` + e + `!` },
-	"java":       func(e string) string { return `System.getenv("` + e + `")` },
-	"csharp":     func(e string) string { return `Environment.GetEnvironmentVariable("` + e + `")` },
-	"ruby":       func(e string) string { return `ENV.fetch("` + e + `")` },
-	"php":        func(e string) string { return `getenv('` + e + `')` },
-	"shell":      func(e string) string { return `"${` + e + `:?not set}"` },
+	"python": func(e string) string { return `os.environ["` + e + `"]` },
+	"go":     func(e string) string { return `os.Getenv("` + e + `")` },
+	// Fail fast with the variable's name where the language allows it in a
+	// single expression, instead of a silent undefined/null at first use.
+	"javascript": failFastJS,
+	"typescript": failFastJS,
+	"java": func(e string) string {
+		return `java.util.Objects.requireNonNull(System.getenv("` + e + `"), "` + e + ` is not set")`
+	},
+	"csharp": func(e string) string {
+		return `(System.Environment.GetEnvironmentVariable("` + e + `") ?? throw new System.InvalidOperationException("` + e + ` is not set"))`
+	},
+	"ruby":  func(e string) string { return `ENV.fetch("` + e + `")` },
+	"php":   func(e string) string { return `getenv('` + e + `')` },
+	"shell": func(e string) string { return `"${` + e + `:?not set}"` },
 }
+
+func failFastJS(e string) string {
+	return `(process.env.` + e + ` ?? (() => { throw new Error("` + e + ` is not set") })())`
+}
+
+// constantContext reports why a literal on line i (0-based) must stay a
+// compile-time constant, so replacing it with a runtime lookup would parse
+// but not build: Go/C#/PHP const declarations, Java/C# annotations and
+// attributes, and switch case labels.
+func constantContext(lang, src string, lines []string, i int) string {
+	line := strings.TrimSpace(lines[i])
+	switch lang {
+	case "go":
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, "x.go", src, 0)
+		if err != nil {
+			return ""
+		}
+		why := ""
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch d := n.(type) {
+			case *ast.GenDecl:
+				if d.Tok == token.CONST && fset.Position(d.Pos()).Line <= i+1 && i+1 <= fset.Position(d.End()).Line {
+					why = "const declaration"
+				}
+			}
+			return why == ""
+		})
+		return why
+	case "java", "csharp", "php":
+		switch {
+		case constDecl.MatchString(line):
+			return "const declaration"
+		case strings.HasPrefix(line, "@") || annotationArg.MatchString(line):
+			return "annotation argument"
+		case lang == "csharp" && strings.HasPrefix(line, "["):
+			return "attribute argument"
+		case strings.HasPrefix(line, "case "):
+			return "case label"
+		}
+	}
+	return ""
+}
+
+var (
+	constDecl     = regexp.MustCompile(`(?:^|\s)const\s`)
+	annotationArg = regexp.MustCompile(`@\w+(?:\.\w+)*\s*\(`)
+)
 
 // BuildPatch replaces each quoted secret literal with an environment lookup
 // in the file's language and returns a unified diff for `git apply`.
@@ -95,6 +152,10 @@ func BuildPatch(root string, items []PatchItem) PatchResult {
 			i := it.Line - 1
 			if i < 0 || i >= len(newLines) || it.Secret == "" {
 				res.Skipped = append(res.Skipped, fmt.Sprintf("%s:%d: line not found (file changed since scan?)", file, it.Line))
+				continue
+			}
+			if why := constantContext(lang, string(data), oldLines, i); why != "" {
+				res.Skipped = append(res.Skipped, fmt.Sprintf("%s:%d: literal is in a %s, which needs a compile-time constant; move the value out by hand and use %s", file, it.Line, why, EnvExpr(lang, it.EnvVar)))
 				continue
 			}
 			repl, ok := replaceQuoted(newLines[i], it.Secret, mk(it.EnvVar), lang)

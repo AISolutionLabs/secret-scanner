@@ -25,3 +25,42 @@ jobs:
           awk -v v="$v" '$0 ~ "^## "v"( |$)" {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
           test -s notes.md || { echo "CHANGELOG.md has no section for $v"; exit 1; }
           gh release create "$GITHUB_REF_NAME" dist/* --title "secretscan $GITHUB_REF_NAME" --notes-file notes.md --verify-tag
+
+  # Install the published release the way the README says, on clean runners,
+  # and check that it actually blocks a secret.
+  verify-install:
+    needs: release
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: install.sh (checksum-verified binary)
+        run: |
+          BINDIR="$RUNNER_TEMP/bin" sh install.sh "$GITHUB_REF_NAME"
+          "$RUNNER_TEMP/bin/secretscan" version | grep -qx "secretscan $GITHUB_REF_NAME"
+      - name: The installed binary blocks a secret and passes clean code
+        run: |
+          d="$RUNNER_TEMP/smoke" && mkdir -p "$d" && cd "$d" && git init -q
+          echo 'print("hello")' > ok.py
+          "$RUNNER_TEMP/bin/secretscan" dir . -q
+          tok="ghp_$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 36)"
+          echo "TOKEN = \"$tok\"" > leak.py
+          if "$RUNNER_TEMP/bin/secretscan" dir . -q; then echo "secret not blocked"; exit 1; fi
+      - uses: actions/setup-go@v5
+        with: { go-version: stable }
+      - name: go install at the tag
+        run: |
+          GOBIN="$RUNNER_TEMP/gobin" go install "github.com/${GITHUB_REPOSITORY}/cmd/secretscan@${GITHUB_REF_NAME}"
+          "$RUNNER_TEMP/gobin/secretscan" version | grep -qx "secretscan $GITHUB_REF_NAME"
+      - name: pre-commit hook resolves to the tag
+        run: |
+          pipx install pre-commit || python3 -m pip install --user pre-commit
+          d="$RUNNER_TEMP/pc" && mkdir -p "$d" && cd "$d" && git init -q
+          git config user.email ci@example.com && git config user.name ci
+          printf 'repos:\n  - repo: https://github.com/%s\n    rev: %s\n    hooks:\n      - id: secretscan\n' "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" > .pre-commit-config.yaml
+          git add .pre-commit-config.yaml && git commit -qm init
+          tok="ghp_$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 36)"
+          echo "TOKEN = \"$tok\"" > leak.py && git add leak.py
+          if pre-commit run secretscan; then echo "hook did not block"; exit 1; fi

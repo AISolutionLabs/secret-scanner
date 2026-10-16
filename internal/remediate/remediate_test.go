@@ -151,7 +151,7 @@ func TestBuildPatch(t *testing.T) {
 		"a.py": "#!/usr/bin/env python3\n\"\"\"doc\"\"\"\nimport os\nimport sys\nTOKEN = os.environ[\"TOKEN\"]\n",
 		"b.py": "import os\nX = os.environ[\"X_KEY\"]\n",
 		"c.go": "package c\n\nimport \"os\"\n\nvar k = os.Getenv(\"K\")",
-		"d.ts": "const k = process.env.K!;\nconst h = \"Bearer SECRET5\";\n",
+		"d.ts": "const k = (process.env.K ?? (() => { throw new Error(\"K is not set\") })());\nconst h = \"Bearer SECRET5\";\n",
 	}
 	for f, w := range want {
 		if res.Files[f] != w {
@@ -230,5 +230,76 @@ func TestValidateRejectsBrokenEdits(t *testing.T) {
 		if ok, err := Validate("python", "x = os.environ[\"K\"\n"); !ok || err == nil {
 			t.Error("broken Python should fail validation")
 		}
+	}
+}
+
+// A patched program must behave like the original when the variable holds
+// the old value, and fail loudly (naming the variable) when it is missing.
+func TestPatchedCodeBehaves(t *testing.T) {
+	type prog struct {
+		file, src, bin string
+		run            func(path string) *exec.Cmd
+	}
+	progs := []prog{
+		{"app.py", "import sys\nTOKEN = \"SECRET1\"\nprint(TOKEN)\n", "python3", func(p string) *exec.Cmd { return exec.Command("python3", "-I", p) }},
+		{"app.mjs", "const token = \"SECRET1\";\nconsole.log(token);\n", "node", func(p string) *exec.Cmd { return exec.Command("node", p) }},
+		{"main.go", "package main\n\nimport \"fmt\"\n\nvar token = \"SECRET1\"\n\nfunc main() { fmt.Println(token) }\n", "go", func(p string) *exec.Cmd { return exec.Command("go", "run", p) }},
+	}
+	for _, p := range progs {
+		if _, err := exec.LookPath(p.bin); err != nil {
+			continue
+		}
+		dir := t.TempDir()
+		write(t, dir, p.file, p.src)
+		res := BuildPatch(dir, []PatchItem{{File: p.file, Line: strings.Count(p.src[:strings.Index(p.src, "SECRET1")], "\n") + 1, Secret: "SECRET1", EnvVar: "APP_TOKEN"}})
+		if len(res.Patched) != 1 {
+			t.Fatalf("%s not patched: %+v", p.file, res)
+		}
+		write(t, dir, p.file, res.Files[p.file])
+		cmd := p.run(filepath.Join(dir, p.file))
+		cmd.Env = append(os.Environ(), "APP_TOKEN=SECRET1", "GOFLAGS=-mod=mod")
+		out, err := cmd.CombinedOutput()
+		if err != nil || strings.TrimSpace(string(out)) != "SECRET1" {
+			t.Errorf("%s with APP_TOKEN set: %v %q", p.file, err, out)
+		}
+		if p.bin == "go" {
+			continue // os.Getenv cannot fail fast; documented in Caveats
+		}
+		cmd = p.run(filepath.Join(dir, p.file))
+		for _, kv := range os.Environ() {
+			if !strings.HasPrefix(kv, "APP_TOKEN=") {
+				cmd.Env = append(cmd.Env, kv)
+			}
+		}
+		out, err = cmd.CombinedOutput()
+		if err == nil || !strings.Contains(string(out), "APP_TOKEN") {
+			t.Errorf("%s without APP_TOKEN must fail naming the variable: err=%v %q", p.file, err, out)
+		}
+	}
+}
+
+// Literals that must stay compile-time constants are never rewritten.
+func TestPatchSkipsConstantContexts(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "c.go", "package c\n\nconst (\n\tA = 1\n\tKey = \"SECRET1\"\n)\n\nvar v = \"SECRET2\"\n")
+	write(t, dir, "C.java", "class C {\n  @Value(\"SECRET3\")\n  String a;\n  String b = \"SECRET4\";\n}\n")
+	write(t, dir, "C.cs", "class C {\n  const string K = \"SECRET5\";\n  [Secret(\"SECRET6\")]\n  string F;\n}\n")
+	res := BuildPatch(dir, []PatchItem{
+		{File: "c.go", Line: 5, Secret: "SECRET1", EnvVar: "A1"},
+		{File: "c.go", Line: 8, Secret: "SECRET2", EnvVar: "A2"},
+		{File: "C.java", Line: 2, Secret: "SECRET3", EnvVar: "A3"},
+		{File: "C.java", Line: 4, Secret: "SECRET4", EnvVar: "A4"},
+		{File: "C.cs", Line: 2, Secret: "SECRET5", EnvVar: "A5"},
+		{File: "C.cs", Line: 3, Secret: "SECRET6", EnvVar: "A6"},
+	})
+	got := map[string]bool{}
+	for _, p := range res.Patched {
+		got[p.Secret] = true
+	}
+	if !got["SECRET2"] || !got["SECRET4"] || len(got) != 2 {
+		t.Errorf("patched %v; want only the runtime-initialised SECRET2 and SECRET4\nskipped: %v", got, res.Skipped)
+	}
+	if !strings.Contains(strings.Join(res.Skipped, "\n"), "compile-time constant") {
+		t.Errorf("skip reasons: %v", res.Skipped)
 	}
 }

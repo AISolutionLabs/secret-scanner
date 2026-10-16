@@ -59,8 +59,8 @@ func TestEvaluate(t *testing.T) {
 		{"vault key name filtered", Input{Tool: "gitleaks", RuleID: "generic-api-key", File: "Jenkinsfile", StartLine: 1, Secret: "inf-vsqt-01-secret-id"}, Filtered, detect.Low},
 		{"digest slice filtered", Input{Tool: "gitleaks", RuleID: "square-access-token", File: "images.yaml", StartLine: 1, Secret: "EAAA7b11777babe28e6133a8b19ff71cea687e0d7f05158dee95a71f76ce3d"}, Filtered, detect.Low}, // secretscan:allow (gitleaks#1468 fixture)
 		{"verified always kept", Input{Tool: "trufflehog", RuleID: "Github", File: "missing.py", StartLine: 1, Secret: "anything", Verified: true}, Verified, detect.High},
-		{"redacted kept for review", Input{Tool: "gitleaks", RuleID: "x", File: "vendor/x.txt", StartLine: 1, Secret: "REDACTED", Redacted: true}, Uncorroborated, detect.Medium},
-		{"unreadable source kept", Input{Tool: "gitleaks", RuleID: "x", File: "nope.txt", StartLine: 1, Secret: "abc"}, Uncorroborated, detect.Medium},
+		{"redacted kept for review", Input{Tool: "gitleaks", RuleID: "x", File: "vendor/x.txt", StartLine: 1, Secret: "REDACTED", Redacted: true}, Uncorroborated, detect.Low},
+		{"unreadable source kept", Input{Tool: "gitleaks", RuleID: "x", File: "nope.txt", StartLine: 1, Secret: "abc"}, Uncorroborated, detect.Low},
 		{"provider shape never word-filtered", Input{Tool: "gitleaks", RuleID: "github-pat", File: "words.py", StartLine: 1, Secret: "ghp_Example" + tok("", 29, 4)}, Confirmed, detect.High},
 	}
 	for _, c := range cases {
@@ -164,4 +164,90 @@ func TestPartiallyRedactedReports(t *testing.T) {
 	if in := finish(Input{Secret: "gh..."}); in.Prefix != "" || !in.Redacted {
 		t.Errorf("short prefix: %+v", in)
 	}
+}
+
+func git(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir, "-c", "user.email=t@example.com", "-c", "user.name=t", "-c", "commit.gpgsign=false"}, args...)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// With --root on a subdirectory, a history finding must be checked against
+// that subdirectory's file at the commit, not a same-named file at the top
+// of the repository, and never against today's working tree.
+func TestHistoryReadsTheReportedFileUnderRoot(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	secret := tok("ghp_", 36, 21)
+	repo := t.TempDir()
+	os.MkdirAll(filepath.Join(repo, "sub"), 0o755)
+	os.WriteFile(filepath.Join(repo, "config.py"), []byte("NAME = \"top-level file\"\n"), 0o644)
+	os.WriteFile(filepath.Join(repo, "sub", "config.py"), []byte("GH = \""+secret+"\"\n"), 0o644)
+	git(t, repo, "init", "-q")
+	git(t, repo, "add", ".")
+	git(t, repo, "commit", "-qm", "c1")
+	c1 := git(t, repo, "rev-parse", "HEAD")
+	os.WriteFile(filepath.Join(repo, "sub", "config.py"), []byte("GH = os.environ[\"GH\"]\n"), 0o644) // removed since
+	git(t, repo, "commit", "-qam", "c2")
+
+	tr := setup(t, nil)
+	tr.Root = filepath.Join(repo, "sub")
+	f := tr.Evaluate(Input{Tool: "gitleaks", RuleID: "github-pat", File: "config.py", StartLine: 1, Secret: secret, Commit: c1})
+	if f.Triage != Confirmed {
+		t.Errorf("secret in sub/config.py at %s should be confirmed from history: %s %v", c1[:7], f.Triage, f.Evidence)
+	}
+	// The same report without the commit is checked against today's file and
+	// no longer matches.
+	f = tr.Evaluate(Input{Tool: "gitleaks", RuleID: "github-pat", File: "config.py", StartLine: 1, Secret: secret})
+	if f.Triage == Confirmed {
+		t.Errorf("working tree no longer contains the secret: %s %v", f.Triage, f.Evidence)
+	}
+}
+
+func TestResolveContainment(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "a"), 0o755)
+	os.WriteFile(filepath.Join(root, "a", "f.py"), []byte("x"), 0o644)
+	os.Symlink(outside, filepath.Join(root, "linkdir"))
+	tr := &Triager{Root: root}
+	for path, ok := range map[string]bool{
+		"a/f.py":                         true,
+		filepath.Join(root, "a", "f.py"): true, // absolute, but inside --root
+		"a/../a/f.py":                    true,
+		"../x.py":                        false,
+		"a/../../x.py":                   false,
+		filepath.Join(outside, "x.py"):   false,
+		"linkdir/x.py":                   false, // a directory symlink that leaves --root
+		"/etc/passwd":                    false,
+	} {
+		_, _, err := tr.resolve(path)
+		if (err == nil) != ok {
+			t.Errorf("resolve(%q): err=%v, want allowed=%v", path, err, ok)
+		}
+	}
+}
+
+// Whatever path a report contains, resolve never returns one outside Root.
+func FuzzResolveStaysInRoot(f *testing.F) {
+	for _, s := range []string{"a.py", "../a", "/etc/passwd", "a/../../b", "./x", "..", "a/./../..", `..\..\x`, "a//b"} {
+		f.Add(s)
+	}
+	root := f.TempDir()
+	f.Fuzz(func(t *testing.T, p string) {
+		tr := &Triager{Root: root}
+		abs, rel, err := tr.resolve(p)
+		if err != nil {
+			return
+		}
+		r, _ := filepath.Rel(root, abs)
+		if r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) || filepath.IsAbs(r) || strings.HasPrefix(rel, "../") {
+			t.Fatalf("resolve(%q) escaped root: %s (%s)", p, abs, rel)
+		}
+	})
 }

@@ -61,7 +61,7 @@ def gitleaks(repo):
 
 
 def detect_secrets(repo):
-    p = run(["detect-secrets", "scan", "--all-files", "."], repo)
+    p = run(["detect-secrets", "scan", "--no-verify", "--all-files", "."], repo)
     res = json.loads(p.stdout)["results"]
     return count_lines((f, it["line_number"]) for f, items in res.items() for it in items if not f.startswith(".leaky-meta"))
 

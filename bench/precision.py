@@ -86,7 +86,7 @@ def gitleaks_triaged(root, key):
 
 
 def detect_secrets(root, key):
-    p = subprocess.run(["detect-secrets", "scan", "--all-files", "."], cwd=root, capture_output=True, text=True, check=True)
+    p = subprocess.run(["detect-secrets", "scan", "--no-verify", "--all-files", "."], cwd=root, capture_output=True, text=True, check=True)
     return [(norm(root, f), (it["line_number"], it["line_number"]), it["type"], True, True)
             for f, items in json.loads(p.stdout)["results"].items() for it in items]
 
