@@ -733,7 +733,7 @@ func (a *CompiledAllowlist) prefixCommit(commit string) bool {
 
 // Validators are the content checks a rule can name in Validate. The
 // detector implements each one (detect.validators).
-var Validators = map[string]bool{"basic-auth": true, "bearer-token": true}
+var Validators = map[string]bool{"basic-auth": true, "opaque-token": true}
 
 // HasTag reports whether the rule carries tag t.
 func (r *CompiledRule) HasTag(t string) bool {

@@ -17,7 +17,7 @@ import (
 // in the ledger.
 var validators = map[string]func(secret string) (bool, string){
 	"basic-auth":   validBasicAuth,
-	"bearer-token": validBearerToken,
+	"opaque-token": validOpaqueToken,
 }
 
 // ValidatorNames lists the implemented validators (tests check it matches
@@ -74,11 +74,11 @@ func validBasicAuth(secret string) (bool, string) {
 	return true, "decodes to user:password (HTTP Basic credentials)"
 }
 
-// validBearerToken rejects scheme arguments that are words, placeholders or
+// validOpaqueToken rejects values that are words, placeholders or
 // identifiers (Bearer YOUR_ACCESS_TOKEN, Bearer authorization_uri, Bearer
 // someAccessToken) and keeps token-shaped values: letters and digits mixed,
 // random-looking, not a dictionary phrase or keyboard run.
-func validBearerToken(secret string) (bool, string) {
+func validOpaqueToken(secret string) (bool, string) {
 	core := strings.TrimRight(secret, "=")
 	hasDigit := strings.IndexFunc(core, unicode.IsDigit) >= 0
 	hasLetter := strings.IndexFunc(core, unicode.IsLetter) >= 0
@@ -89,5 +89,5 @@ func validBearerToken(secret string) (bool, string) {
 		segmentsAreWords(core) || wordTokens(core) || camelWords(core) || dottedNamespace(core) {
 		return false, ""
 	}
-	return true, "value of an HTTP Bearer authorization scheme"
+	return true, "token-shaped value (mixed letters and digits, not words or an identifier)"
 }

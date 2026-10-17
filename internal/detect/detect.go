@@ -326,7 +326,7 @@ func (d *Detector) hits(text, lower, path string) ([]hit, []drop) {
 					dropIt("sequential-or-decoded-prose")
 					continue
 				}
-				if filters && rule.ID == "password-assignment" && weakPasswordNoise(secret) {
+				if filters && (rule.ID == "password-assignment" || rule.HasTag("password")) && weakPasswordNoise(secret) {
 					dropIt("placeholder-password")
 					continue
 				}
