@@ -46,8 +46,32 @@ func Validate(lang, content string) (checked bool, err error) {
 			return true, fmt.Errorf("javascript: %s", lastLine(string(out)))
 		}
 		return true, nil
+	case "ruby", "php", "shell":
+		// ruby -c and php -l compile without running (php -l also rejects
+		// non-constant property and parameter defaults); bash -n parses.
+		bin := map[string]string{"ruby": "ruby", "php": "php", "shell": "bash"}[lang]
+		flag := map[string]string{"ruby": "-c", "php": "-l", "shell": "-n"}[lang]
+		path, lerr := exec.LookPath(bin)
+		if lerr != nil {
+			return false, nil
+		}
+		f, err := os.CreateTemp("", "secretscan-check-*")
+		if err != nil {
+			return false, nil
+		}
+		defer os.Remove(f.Name())
+		f.WriteString(content)
+		f.Close()
+		if out, err := exec.Command(path, flag, f.Name()).CombinedOutput(); err != nil {
+			return true, fmt.Errorf("%s: %s", lang, firstLine(string(out)))
+		}
+		return true, nil
 	}
 	return false, nil
+}
+
+func firstLine(s string) string {
+	return strings.Split(strings.TrimSpace(s), "\n")[0]
 }
 
 func lastLine(s string) string {

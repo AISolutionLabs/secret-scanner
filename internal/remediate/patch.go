@@ -98,8 +98,33 @@ func constantContext(lang, src string, lines []string, i int) string {
 			return "annotation argument"
 		case lang == "csharp" && strings.HasPrefix(line, "["):
 			return "attribute argument"
-		case strings.HasPrefix(line, "case "):
+		case caseLabel.MatchString(line):
 			return "case label"
+		case lang == "php" && (phpProperty.MatchString(line) || phpParamDefault.MatchString(line)):
+			return "property, static variable or parameter default"
+		case lang == "csharp" && csParamDefault.MatchString(line):
+			return "optional parameter default"
+		case lang == "java":
+			// A static final String initialised with a literal is a
+			// compile-time constant; case labels and annotations that use it
+			// stop compiling once it is a runtime call.
+			if m := javaConstant.FindStringSubmatch(line); m != nil {
+				uses := regexp.MustCompile(`\bcase\s+(?:\w+\.)*` + m[1] + `\b|@\w+(?:\.\w+)*\s*\([^)]*\b` + m[1] + `\b`)
+				if uses.MatchString(src) {
+					return "constant used in a case label or annotation"
+				}
+			}
+		}
+	case "typescript":
+		// String enum members must be constant.
+		for k := i; k >= 0 && k > i-200; k-- {
+			if tsEnum.MatchString(lines[k]) {
+				body := strings.Join(lines[k:i+1], "\n")
+				if strings.Count(body, "{") > strings.Count(body, "}") {
+					return "enum member"
+				}
+				break
+			}
 		}
 	}
 	return ""
@@ -108,6 +133,14 @@ func constantContext(lang, src string, lines []string, i int) string {
 var (
 	constDecl     = regexp.MustCompile(`(?:^|\s)const\s`)
 	annotationArg = regexp.MustCompile(`@\w+(?:\.\w+)*\s*\(`)
+	caseLabel     = regexp.MustCompile(`(?:^|[\s{;])case\s`)
+	// PHP property and static variable initialisers and parameter defaults
+	// must be constant expressions.
+	phpProperty     = regexp.MustCompile(`^(?:(?:public|private|protected|var|static|readonly|final)\s+)+(?:\??[\w\\|]+\s+)?\$\w+\s*=`)
+	phpParamDefault = regexp.MustCompile(`\bfunction\b[^)]*\$\w+\s*=\s*["']`)
+	csParamDefault  = regexp.MustCompile(`\((?:[^()"]*,)?\s*(?:(?:this|ref|in|params)\s+)?[\w.<>\[\]?]+\s+\w+\s*=\s*@?"`)
+	javaConstant    = regexp.MustCompile(`\b(?:static\s+final|final\s+static)\s+String\s+(\w+)\s*=`)
+	tsEnum          = regexp.MustCompile(`\benum\s+\w+\s*\{`)
 )
 
 // BuildPatch replaces each quoted secret literal with an environment lookup
@@ -158,9 +191,15 @@ func BuildPatch(root string, items []PatchItem) PatchResult {
 				res.Skipped = append(res.Skipped, fmt.Sprintf("%s:%d: literal is in a %s, which needs a compile-time constant; move the value out by hand and use %s", file, it.Line, why, EnvExpr(lang, it.EnvVar)))
 				continue
 			}
-			repl, ok := replaceQuoted(newLines[i], it.Secret, mk(it.EnvVar), lang)
+			start := 0
+			for _, l := range newLines[:i] {
+				start += len(l) + 1
+			}
+			cur := strings.Join(newLines, "\n")
+			inCode := func(col int) bool { return codeAt(lang, cur, start+col) }
+			repl, ok := replaceQuoted(newLines[i], it.Secret, mk(it.EnvVar), lang, inCode)
 			if !ok {
-				res.Skipped = append(res.Skipped, fmt.Sprintf("%s:%d: secret is not a standalone quoted literal; edit by hand and use %s", file, it.Line, EnvExpr(lang, it.EnvVar)))
+				res.Skipped = append(res.Skipped, fmt.Sprintf("%s:%d: secret is not a standalone quoted literal in code (or it sits in a comment, multi-line string or heredoc); edit by hand and use %s", file, it.Line, EnvExpr(lang, it.EnvVar)))
 				continue
 			}
 			newLines[i] = repl
@@ -223,21 +262,40 @@ func splitLines(s string) ([]string, bool) {
 }
 
 // replaceQuoted swaps "secret" (with its quotes) for expr. The literal must
-// be exactly the secret, so partial strings like "Bearer xyz" are left alone.
-func replaceQuoted(line, secret, expr, lang string) (string, bool) {
+// be exactly the secret, so partial strings like "Bearer xyz" are left alone,
+// and it must sit in code: inCode(col) reports whether the quote at col is
+// outside comments, strings and heredocs (see codeAt).
+func replaceQuoted(line, secret, expr, lang string, inCode func(col int) bool) (string, bool) {
 	quotes := `"'`
 	if lang == "javascript" || lang == "typescript" {
 		quotes += "`"
 	}
 	for _, q := range quotes {
 		lit := string(q) + secret + string(q)
-		if i := strings.Index(line, lit); i >= 0 {
-			if insideString(line, i) {
-				return line, false // nested in another literal (struct tag, template, SQL...): not an expression slot
+		for from := 0; ; {
+			j := strings.Index(line[from:], lit)
+			if j < 0 {
+				break
 			}
-			if lang == "python" && i > 0 && strings.ContainsRune("rRbBuUfF", rune(line[i-1])) && (i < 2 || !isIdent(line[i-2])) {
-				i-- // r"..." / b"..." prefixes
-				lit = line[i:i+1] + lit
+			i := from + j
+			from = i + 1
+			if insideString(line, i) || inCode != nil && !inCode(i) {
+				continue // nested in another literal, a comment or a multi-line string: not an expression slot
+			}
+			if lang == "python" {
+				// String prefixes: r"", f"", rb"", Rb"" ... A bytes literal would
+				// become a str: left for a manual edit.
+				p := i
+				for p > 0 && i-p < 2 && strings.ContainsRune("rRbBuUfF", rune(line[p-1])) {
+					p--
+				}
+				if p > 0 && isIdent(line[p-1]) {
+					p = i // part of an identifier, not a prefix
+				}
+				if strings.ContainsAny(line[p:i], "bB") {
+					return line, false
+				}
+				lit, i = line[p:i]+lit, p
 			}
 			return line[:i] + expr + line[i+len(lit):], true
 		}
