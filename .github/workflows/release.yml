@@ -17,6 +17,9 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod }
       - run: go test -count=1 ./...
+      # The published figures must describe this release's detection code.
+      - name: Benchmark figures measured on this detection code
+        run: python3 bench/render_docs.py --check --release
       - run: make release VERSION=${GITHUB_REF_NAME}
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS

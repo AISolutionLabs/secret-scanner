@@ -226,7 +226,7 @@ func bindCommon(fs *flag.FlagSet, c *common, mode string) {
 	fs.StringVar(&c.testFixtures, "test-fixtures", "", "block (default) | review: whether balanced blocks generic values in test/example files")
 	fs.StringVar(&c.policy, "policy", "", "strict (every finding blocks; default) | balanced (high and medium confidence, and generic values in test files, block; weak evidence is listed for review)")
 	fs.StringVar(&c.defaultPolicy, "default-policy", "", "policy to use when neither --policy nor the config sets one (git hooks use balanced)")
-	fs.StringVar(&c.minConfidence, "min-confidence", "low", "hide findings below this confidence: low|medium|high (hidden findings are still counted)")
+	fs.StringVar(&c.minConfidence, "min-confidence", "low", "hide findings below this confidence: low|medium|high, evidence levels, not probabilities (hidden findings are still counted)")
 	fs.BoolVar(&c.showSupp, "show-suppressed", false, "list every candidate removed by a filter or allowlist, with the reason")
 	fs.Float64Var(&c.maxMB, "max-target-megabytes", 10, "skip files (or diff additions per file) larger than this; 0 = no limit")
 	fs.IntVar(&c.decodeDepth, "max-decode-depth", 2, "recursively decode base64/hex/percent-encoded data this many levels; 0 = off")

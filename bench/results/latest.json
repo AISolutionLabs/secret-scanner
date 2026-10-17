@@ -1,27 +1,184 @@
 {
-  "_comment": "Headline benchmark figures quoted in README.md, docs/precision.md and the install-hook message. Edit here only, then run: python3 bench/render_docs.py (CI runs it with --check). All figures are CredData secrets-only labels on the test half (repositories never used for design) unless the key says otherwise.",
+  "_comment": "Every benchmark figure quoted in README.md, docs/, CHANGELOG.md, the release notes and the install-hook message. Edit here only, then run: python3 bench/render_docs.py (CI runs it with --check, which also checks every figure against results_file and that no other benchmark figure is published). All CredData figures are secrets-only labels on the test half (repositories never used for design) unless the key says otherwise.",
   "results_file": "bench/results/2026-10-17.md",
   "date": "2026-10-17",
   "holdout_repos": 181,
   "dataset_repos": 337,
   "tools": {
-    "secretscan":       {"precision": 91.5, "recall": 59.2, "f1": 0.719},
-    "secretscan_prev":  {"precision": 83.7, "recall": 48.0, "f1": 0.611},
-    "gitleaks":         {"precision": 91.8, "recall": 28.9, "f1": 0.440},
-    "gitleaks_triage":  {"precision": 93.6, "recall": 27.5, "f1": 0.425},
-    "trufflehog":       {"precision": 44.7, "recall": 3.4,  "f1": 0.064, "version": "3.97.9"}
+    "secretscan": {
+      "precision": 91.5,
+      "recall": 59.2,
+      "f1": 0.719
+    },
+    "secretscan_prev": {
+      "precision": 83.7,
+      "recall": 48.0,
+      "f1": 0.611
+    },
+    "gitleaks": {
+      "precision": 91.8,
+      "recall": 28.9,
+      "f1": 0.44
+    },
+    "gitleaks_triage": {
+      "precision": 93.6,
+      "recall": 27.5,
+      "f1": 0.425
+    },
+    "trufflehog": {
+      "precision": 44.7,
+      "recall": 3.4,
+      "f1": 0.064,
+      "version": "3.97.9"
+    }
   },
-  "dev": {"precision": 98.8, "recall": 89.0},
+  "dev": {
+    "precision": 98.8,
+    "recall": 89.0
+  },
   "policy": {
-    "strict":           {"recall": 59.2, "precision": 91.5},
-    "balanced":         {"recall": 39.9, "precision": 90.2},
-    "balanced_review":  {"recall": 22.2, "precision": 87.4}
+    "strict": {
+      "recall": 59.2,
+      "precision": 91.5
+    },
+    "balanced": {
+      "recall": 39.9,
+      "precision": 90.2
+    },
+    "balanced_review": {
+      "recall": 22.2,
+      "precision": 87.4
+    }
   },
   "triage": {
     "gitleaks_true": 1110,
     "gitleaks_false": 99,
-    "conservative": {"true": 1056, "false": 72},
-    "standard":     {"true": 1005, "false": 68},
+    "conservative": {
+      "true": 1056,
+      "false": 72
+    },
+    "standard": {
+      "true": 1005,
+      "false": 68
+    },
     "changetoken_lost": 41
-  }
+  },
+  "measured_commit": "9aa5f00",
+  "policy_settings": {
+    "strict": "--policy strict (scan and CI default)",
+    "balanced": "--policy balanced, testFixtures = \"block\" (hook default)",
+    "balanced_review": "--policy balanced, testFixtures = \"review\""
+  },
+  "breakdown": {
+    "confidence": {
+      "high": {
+        "true": 601,
+        "false": 72,
+        "precision": 89.3
+      },
+      "medium": {
+        "true": 252,
+        "false": 51,
+        "precision": 83.2
+      },
+      "low": {
+        "true": 1426,
+        "false": 87,
+        "precision": 94.2
+      }
+    },
+    "path": {
+      "other path": {
+        "true": 746,
+        "false": 102,
+        "precision": 88.0
+      },
+      "test/example path": {
+        "true": 1525,
+        "false": 108,
+        "precision": 93.4
+      }
+    },
+    "context": {
+      "local": {
+        "true": 98,
+        "false": 5,
+        "precision": 95.1
+      },
+      "none": {
+        "true": 2173,
+        "false": 205,
+        "precision": 91.4
+      }
+    },
+    "detector_family": {
+      "generic": {
+        "true": 1590,
+        "false": 148,
+        "precision": 91.5
+      },
+      "provider format": {
+        "true": 693,
+        "false": 62,
+        "precision": 91.8
+      }
+    },
+    "confidence_by_path": {
+      "high, other path": {
+        "true": 406,
+        "false": 46,
+        "precision": 89.8
+      },
+      "medium, other path": {
+        "true": 252,
+        "false": 51,
+        "precision": 83.2
+      },
+      "low, other path": {
+        "true": 88,
+        "false": 5,
+        "precision": 94.6
+      },
+      "high, test/example path": {
+        "true": 195,
+        "false": 26,
+        "precision": 88.2
+      },
+      "low, test/example path": {
+        "true": 1338,
+        "false": 82,
+        "precision": 94.2
+      }
+    }
+  },
+  "disagreements": {
+    "changetoken_missed_lines": 42,
+    "recall_excluding": 59.9
+  },
+  "leaky_repo": {
+    "risk_lines": 96,
+    "secretscan_first": {
+      "found": 36,
+      "extra": 3
+    },
+    "secretscan": {
+      "found": 65,
+      "extra": 4
+    },
+    "gitleaks": {
+      "found": 21,
+      "extra": 1
+    },
+    "trufflehog": {
+      "found": 10,
+      "extra": 0
+    },
+    "detect_secrets": {
+      "found": 37,
+      "extra": 2,
+      "version": "1.5.0"
+    },
+    "first_results_file": "bench/results/2026-10-15.md"
+  },
+  "detection_fingerprint": "df00bae9573b784f"
 }

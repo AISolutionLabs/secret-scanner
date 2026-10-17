@@ -10,12 +10,15 @@ import (
 	"github.com/AISolutionLabs/secret-scanner/internal/config"
 )
 
-// Confidence levels. A finding's confidence comes from independent pieces of
-// evidence; no single signal (in particular entropy) is enough on its own.
+// Confidence levels are qualitative evidence levels, not probabilities: they
+// say how strong the evidence is that a value is a live credential in
+// production code, counted from independent signals (no single signal, in
+// particular entropy, is enough). They are not calibrated against any
+// dataset's labels; measured precision per level is in bench/results.
 const (
-	High   = "high"   // block: provider-specific format, or several independent signals
-	Medium = "medium" // probably a secret; blocks under balanced too
-	Low    = "low"    // weak evidence, or a generic value in a test/example file: review under balanced
+	High   = "high"   // provider-specific format, or four or more independent signals
+	Medium = "medium" // three independent signals; blocks under balanced too
+	Low    = "low"    // fewer signals, or a generic value in a test/example file: review under balanced
 )
 
 // FixtureCap is the evidence line of a generic value capped at low because

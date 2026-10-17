@@ -3,5 +3,5 @@
 package main
 
 // balancedPolicyFigures is quoted by install-hook.
-const balancedPolicyFigures = "On CredData repositories never used for design, balanced blocks 39.9% of\n" +
-	"labeled secrets at 90.2% precision; strict blocks 59.2% at 91.5%.\n"
+const balancedPolicyFigures = "On CredData repositories never used for design, balanced (testFixtures = \"block\")\n" +
+	"blocks 39.9% of labeled secrets at 90.2% precision; strict blocks 59.2% at 91.5%.\n"

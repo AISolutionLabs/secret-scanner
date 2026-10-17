@@ -215,3 +215,54 @@ func TestNoiseFiltersSpareRandomSecrets(t *testing.T) {
 		t.Errorf("%d/%d random secrets below the entropy threshold", belowEntropy, n)
 	}
 }
+
+// Every provider-format rule, not just one: a provider-shaped credential is
+// never downgraded, and never stops blocking under balanced (even with
+// testFixtures = "review"), merely because of where it sits: test, fixture,
+// example and doc paths, .env.example and compose files.
+func TestNoProviderFormatDowngradedByLocation(t *testing.T) {
+	d := defaultDetector(t, 0)
+	locations := []string{"tests/%s", "src/__tests__/%s", "testdata/%s", "fixtures/%s", "examples/%s", "docs/%s",
+		"test_%s", "%s.spec", "mock_%s"}
+	contexts := []string{".env.example", ".env.test", "docker-compose.yml", "compose.yaml"}
+	checked := 0
+	for id, sm := range samples() {
+		base := sm.path
+		if base == "" {
+			base = "src/app.env"
+		}
+		prod := findingFor(d.Detect(detect.Fragment{Raw: sm.text, FilePath: base, StartLine: 1}), id)
+		if prod == nil || len(prod.Evidence) == 0 || !strings.HasPrefix(prod.Evidence[0], "provider-specific format") {
+			continue // contextual rule: location is one of its signals by design
+		}
+		checked++
+		var paths []string
+		if sm.path == "" {
+			for _, l := range locations {
+				paths = append(paths, strings.Replace(l, "%s", "app.env", 1))
+			}
+			paths = append(paths, contexts...) // files that carry a local/example context
+		} else {
+			// Path-scoped rules (.docker/config.json, ...): keep the path the
+			// rule applies to, under test/example directories.
+			for _, dir := range []string{"tests/", "testdata/", "fixtures/", "examples/", "docs/"} {
+				paths = append(paths, dir+base)
+			}
+		}
+		for _, p := range paths {
+			f := findingFor(d.Detect(detect.Fragment{Raw: sm.text, FilePath: p, StartLine: 1}), id)
+			switch {
+			case f == nil:
+				t.Errorf("%s at %s: not reported (reported at %s)", id, p, base)
+			case f.Confidence != prod.Confidence:
+				t.Errorf("%s at %s: confidence %s, %s at %s", id, p, f.Confidence, prod.Confidence, base)
+			case !detect.BlocksFinding("balanced", "review", *f):
+				t.Errorf("%s at %s: does not block under balanced (context %q, evidence %v)", id, p, f.Context, f.Evidence)
+			}
+		}
+	}
+	if checked < 80 {
+		t.Fatalf("only %d provider-format rules checked; the sample set or the evidence wording changed", checked)
+	}
+	t.Logf("%d provider-format rules checked at %d locations each", checked, len(locations)+len(contexts))
+}

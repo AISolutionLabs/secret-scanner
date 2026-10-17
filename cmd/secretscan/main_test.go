@@ -162,6 +162,11 @@ func TestStdinDiffAndSARIF(t *testing.T) {
 	var log struct {
 		Version string `json:"version"`
 		Runs    []struct {
+			Tool struct {
+				Driver struct {
+					Properties map[string]string `json:"properties"`
+				} `json:"driver"`
+			} `json:"tool"`
 			Results []struct {
 				RuleID    string `json:"ruleId"`
 				Locations []struct {
@@ -180,6 +185,10 @@ func TestStdinDiffAndSARIF(t *testing.T) {
 	res := log.Runs[0].Results
 	if log.Version != "2.1.0" || len(res) != 1 || res[0].Locations[0].PhysicalLocation.Region.StartLine != 2 {
 		t.Errorf("sarif = %s", r.stdout)
+	}
+	// Confidence is documented in the output as an evidence level, not a score.
+	if cs := log.Runs[0].Tool.Driver.Properties["confidenceScale"]; !strings.Contains(cs, "not probabilities") {
+		t.Errorf("SARIF driver lacks the confidence scale: %q", cs)
 	}
 }
 

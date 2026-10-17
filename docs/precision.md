@@ -62,6 +62,38 @@ one supporting signal from contextual rules.
 `--verify` overrides the heuristics: a verified-live secret is high
 confidence, and one the provider rejects is low.
 
+### What confidence means, and what it does not
+
+Confidence is a **qualitative evidence level**: how many independent signals
+say a value is a live credential in production code. It is **not a
+probability** and is not calibrated against any dataset's labels, so do not
+read "medium" as a likelihood or sort a review queue as if it were a score. What blocks is decided by the policy, not by confidence alone: under
+balanced, generic values in test files block by default although they are
+low confidence. The JSON `Confidence`, SARIF `properties.confidence` and
+text `[SEVERITY·confidence]` fields all carry this level; SARIF also states
+it in `tool.driver.properties.confidenceScale`.
+
+<!-- bench:confidence -->
+Measured on CredData's holdout ([2026-10-17](../bench/results/2026-10-17.md#6-breakdown-of-the-holdout-run)),
+with paths classified by the same test/example rule the scanner uses:
+
+| Confidence | Other paths | Test/example paths | All |
+|---|---|---|---|
+| high | 89.8% (406 true) | 88.2% (195 true) | 89.3% |
+| medium | 83.2% (252 true) | none (capped at low) | 83.2% |
+| low | 94.6% (88 true) | 94.2% (1,338 true) | 94.2% |
+
+Low is the most precise level because CredData labels credential-shaped
+test fixtures as real secrets, and those are exactly the generic values
+secretscan caps at low; outside test paths high is more precise than medium,
+but the few low findings there are precise too. Provider formats
+(91.8%) and generic rules (91.5%) are equally precise.
+<!-- /bench:confidence -->
+
+A provider-format token in a test file is never downgraded: every
+provider-format rule is checked at test, fixture, example and doc paths,
+`.env.example` and compose files (`TestNoProviderFormatDowngradedByLocation`).
+
 ### Policies
 
 | | strict (default for scans and CI) | balanced (default for git hooks) |
@@ -73,7 +105,8 @@ confidence, and one the provider rejects is low.
 
 <!-- bench:policy-table -->
 The trade-off is measured on CredData repositories never used for design
-([2026-10-17](../bench/results/2026-10-17.md)):
+([2026-10-17](../bench/results/2026-10-17.md)). Detection recall is what strict reports; blocking
+recall is what each policy blocks:
 
 | Setting | Blocking recall | Blocking precision |
 |---|---|---|

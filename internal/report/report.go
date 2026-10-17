@@ -31,6 +31,9 @@ type Options struct {
 var Formats = []string{"text", "json", "sarif", "csv", "junit", "stats"}
 
 // Write renders findings in the given format.
+// ConfidenceScale describes the confidence field for report consumers.
+const ConfidenceScale = "high/medium/low are qualitative evidence levels (independent signals that a value is a live credential in production code), not probabilities; policies decide what blocks"
+
 func Write(w io.Writer, format string, fs []detect.Finding, rules []*config.CompiledRule, version string, o Options) error {
 	switch strings.ToLower(format) {
 	case "", "text":
@@ -366,7 +369,10 @@ func SARIF(w io.Writer, fs []detect.Finding, rules []*config.CompiledRule, versi
 		"runs": []any{map[string]any{
 			"tool": map[string]any{"driver": map[string]any{
 				"name": "secretscan", "version": version, "semanticVersion": version,
-				"informationUri": "https://github.com/AISolutionLabs/secret-scanner", "rules": srules}},
+				"informationUri": "https://github.com/AISolutionLabs/secret-scanner", "rules": srules,
+				// Result properties.confidence is an evidence level; say so
+				// where SARIF consumers look, so it is not read as a score.
+				"properties": map[string]any{"confidenceScale": ConfidenceScale}}},
 			"results": results,
 		}},
 	}

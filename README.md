@@ -139,18 +139,22 @@ secretscan: 2 secrets found (1 critical, 1 medium) · scanned 3 files (490 B) in
   test/example files. Only weak evidence (low confidence: dictionary-style
   passwords, values with few supporting signals) is printed under
   "Needs review" without blocking. On CredData repositories never used for
-  design ([2026-10-17](bench/results/2026-10-17.md)), balanced blocks 39.9% of
-  labeled secrets at 90.2% precision, strict 59.2% at 91.5%.
+  design ([2026-10-17](bench/results/2026-10-17.md)), balanced with the default
+  `testFixtures = "block"` blocks 39.9% of labeled secrets at
+  90.2% precision; strict blocks everything it reports, 59.2% at 91.5%.
 - A real credential committed as a test fixture is still a credential, so
   fixtures block by default. A repository whose tests are full of fake
   credentials can set `testFixtures = "review"` in `.secretscan.toml` (or
   `--test-fixtures review`) to list them for review instead; balanced then
-  blocks 22.2% of those labeled secrets. Provider-format tokens
+  blocks 22.2% of those labeled secrets at 87.4%. Provider-format tokens
   (`ghp_`, `AKIA`, private keys, ...) block in test files under every setting.
 <!-- /bench:policy -->
 - Keep CI on strict so nothing merges without a decision.
 - Every finding has `Confidence` (high/medium/low), `Evidence` and `Blocking`
   in JSON. SARIF levels follow the policy (blocking = `error`).
+- Confidence is a qualitative evidence level, **not a probability**: measured
+  precision per level is published and is not monotonic on CredData
+  ([why](docs/precision.md#what-confidence-means-and-what-it-does-not)).
 - `--min-confidence medium` hides weaker findings (still counted in the summary).
 - `--show-suppressed` lists every candidate a filter or allowlist removed:
   file, line, rule, reason and redacted value.
@@ -446,27 +450,30 @@ repositories never used for design:
 | secretscan, before the latest round | 83.7% | 48.0% | 0.611 |
 | gitleaks | 91.8% | 28.9% | 0.440 |
 | gitleaks + `secretscan triage` | **93.6%** | 27.5% | 0.425 |
-| trufflehog 3.97.9 | 44.7% | 3.4% | 0.064 |
+| trufflehog 3.97.9 (`--no-verification`) | 44.7% | 3.4% | 0.064 |
 
 On unseen repositories secretscan matches gitleaks' precision while finding
-twice as many of the labeled secrets. Under balanced, the hook default,
-39.9% of them block at 90.2% precision. On the half used for design
+twice as many of the labeled secrets. Under balanced, the hook default
+(`testFixtures = "block"`), 39.9% of them block at 90.2% precision. On the half used for design
 it reaches 98.8% / 89.0%; the gap is the honest measure of how much of
 that transfers. Triage drops 54 of gitleaks' true findings, 41 of them
 AWS WAF `ChangeToken` values that are deliberately not treated as
-credentials.
+credentials ([label disagreements](docs/benchmark-policy.md)).
 <!-- /bench:holdout -->
 The very first CredData run, before any CredData-informed change, is in
 [2026-10-15](bench/results/2026-10-15.md).
 
 **2. Independent ground truth ([leaky-repo](https://github.com/Plazmaz/leaky-repo), 96 labeled risk lines).**
 
+<!-- bench:leaky -->
 | Tool | Risk lines found | Extra lines (FPs) |
 |---|---|---|
 | secretscan, before any leaky-repo-informed change | 36/96 (37.5%) | 3 |
 | secretscan, current (rules added for the gaps it exposed) | 65/96 (67.7%) | 4 |
 | gitleaks | 21/96 (21.9%) | 1 |
-| detect-secrets 1.5.0 | 37/96 (38.5%) | 1 |
+| trufflehog 3.97.9 | 10/96 (10.4%) | 0 |
+| detect-secrets 1.5.0 | 37/96 (38.5%) | 2 |
+<!-- /bench:leaky -->
 
 **3. Manual adjudication of package code.** All 132 secretscan findings on
 44,284 files of 52 pinned npm/PyPI packages were inspected: **0 live
@@ -490,14 +497,25 @@ alphabet go through the generic pipeline in CI, which fails if filters remove
 more than 0.02% of any alphabet (0.05% for passwords;
 `TestFalseNegativesPerAlphabet`).
 
-trufflehog 3.97.9 (run with `--no-verification`) finds 2.4% of CredData's
-secrets at 57.8% precision, since it only has provider-specific detectors; see
-[the results](bench/results/2026-10-16.md#5-trufflehog).
+<!-- bench:trufflehog-note -->
+trufflehog 3.97.9 (run with `--no-verification`) finds 3.4% of CredData's
+secrets on the holdout at 44.7% precision, since it only has provider-specific
+detectors; its recall reflects detector coverage, not its usual verified-only
+workflow. See [the results](bench/results/2026-10-17.md).
+<!-- /bench:trufflehog-note -->
 
-**Not yet shown:** nobody outside the project has reproduced these numbers yet. `secretscan dir . -f stats` prints
-counts only (no paths, values or fingerprints) for sharing results in an issue.
+**Not yet shown:** a second independently labeled corpus, an outside
+reproduction, and real developers' dismissal rates. The rules for running
+the second benchmark (frozen detection code, labels used as given, publish
+whatever the outcome) and for label disagreements such as `ChangeToken` are
+in [docs/benchmark-policy.md](docs/benchmark-policy.md);
+`bench/score_labeled.py` scores any line-labeled corpus. `secretscan dir . -f stats`
+prints counts only (no paths, values or fingerprints) for sharing results in
+an issue.
 
-Reproduce: see the [results file](bench/results/2026-10-15.md#reproduce).
+Reproduce: `bench/reproduce.sh`, or the `benchmark` workflow in a fork. Every
+figure above is generated from [bench/results/latest.json](bench/results/latest.json);
+CI fails if any published figure disagrees with it or with the dated results file.
 
 ## How noise is filtered
 

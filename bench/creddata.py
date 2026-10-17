@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Score scanners on Samsung CredData (https://github.com/Samsung/CredData):
 ~11.5k files from 337 real GitHub repositories with manually labeled
-credential lines (secrets obfuscated, formats preserved). secretscan was not
-developed or tuned on it.
+credential lines (secrets obfuscated, formats preserved). The first run
+(2026-10-15) preceded any CredData-informed change; since then changes are
+designed on the dev half only and measured on the test half (see --split
+and docs/benchmark-policy.md).
 
   python3 bench/creddata.py /path/to/CredData [--tools secretscan,gitleaks,gitleaks+triage,detect-secrets]
   TRUFFLEHOG=/path/to/trufflehog python3 bench/creddata.py /path/to/CredData --tools trufflehog,trufflehog+triage

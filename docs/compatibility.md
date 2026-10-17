@@ -16,8 +16,8 @@ new major version and a CHANGELOG entry under "Breaking":
 | Ignore files and fingerprints | `file:rule:line` and `sha256:` entries keep matching |
 
 **Not** covered, because improving them is the point of minor releases:
-which values a rule matches, noise filters, confidence scores, and default
-policy blocking decisions. Minor releases can therefore report findings that
+which values a rule matches, noise filters, confidence levels (qualitative
+evidence levels, not probabilities), and default policy blocking decisions. Minor releases can therefore report findings that
 earlier versions missed, or stop reporting noise. Pin the version in CI
 (`rev:` for pre-commit, a release binary with `SHA256SUMS`) and read the
 CHANGELOG before upgrading. A change that makes a previously blocking
