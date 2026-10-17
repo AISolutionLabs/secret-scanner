@@ -297,6 +297,7 @@ func (d *Detector) hits(text, lower, path string) ([]hit, []drop) {
 					continue // never qualified: not a suppression
 				}
 				var extra []string
+				uuidCred := false
 				if rule.Validate != "" {
 					ok, why := validators[rule.Validate](secret)
 					if !ok {
@@ -314,8 +315,16 @@ func (d *Detector) hits(text, lower, path string) ([]hit, []drop) {
 						continue
 					}
 					if why := genericNoise(secret, quoted, path); why != "" {
-						dropIt(why)
-						continue
+						// A UUID under a credential-named key (access_token,
+						// secretVal, const key) can be the credential; it is
+						// kept at low confidence. Request/correlation-style
+						// keys keep the filter.
+						if why == "uuid" && credentialUUIDKey(text, w[0]+s) {
+							uuidCred = true
+						} else {
+							dropIt(why)
+							continue
+						}
 					}
 				}
 				if filters && isKnownPublic(secret) {
@@ -331,6 +340,9 @@ func (d *Detector) hits(text, lower, path string) ([]hit, []drop) {
 					continue
 				}
 				conf, ev := assess(rule, secret, quoted, path, ent, extra...)
+				if uuidCred {
+					conf, ev = Low, append(ev, UUIDCredentialEvidence)
+				}
 				hs = append(hs, hit{rule: rule, mStart: w[0] + m[0], mEnd: w[0] + m[1], sStart: w[0] + s, sEnd: w[0] + e,
 					match: strings.TrimSpace(sub[m[0]:m[1]]), secret: secret, entropy: ent, confidence: conf, evidence: ev})
 			}

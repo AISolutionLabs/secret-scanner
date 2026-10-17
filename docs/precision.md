@@ -156,7 +156,12 @@ access tokens, letters-only `.env` values, base64 under `key =`. Exceptions
 that stay filtered: namespaced/snake-case identifiers (`ALICE_secp112r2`),
 values that name a secret (`prod-db-secret-id`), and UUIDs under request-style
 keys (`request_token`, `idempotency_key`). `--mode standard` applies every
-filter.
+filter. Scans themselves now report a UUID under a credential-named key
+(`access_token`, `secretVal`, `const key`) at low confidence, with the same
+request-style exceptions (shared `detect.CredentialKey` / `detect.RequestIDKey`).
+Concurrency and paging tokens count as request-style: an AWS WAF
+`ChangeToken` only serializes updates and grants no access, so it is not
+reported even though CredData labels it as a token.
 
 It was designed on one half of CredData's repositories and measured once on
 the other half, which no change had seen (gitleaks: 1,110 true, 99 false):
@@ -225,12 +230,12 @@ Results are in [bench/results/](../bench/results/2026-10-15.md).
 - Nobody outside the project has run `bench/reproduce.sh` yet; the
   `benchmark` workflow lets anyone do it in a fork.
 - trufflehog has not been run directly.
-- Not detected yet: HTTP `Authorization` headers (Basic, Bearer, NTLM),
-  PASETO/PASERK, NKEY seeds, JWKs and OTP secrets (the largest CredData miss
-  classes); hex test vectors of consecutive bytes are a false-positive class.
+- Not detected yet: NTLM `Authorization` headers, PASETO/PASERK, NKEY
+  seeds, JWKs and OTP secrets (Basic credentials are detected when they
+  decode to user:password, Bearer tokens when token-shaped); hex test vectors of consecutive bytes are a false-positive class.
 - Filters are heuristics. Known gaps, pinned as "borderline" tests:
   passphrases made only of dictionary words under a generic key, UUID-shaped
-  secrets without a provider rule, a literal placeholder word used as a real
+  secrets under non-credential keys, a literal placeholder word used as a real
   password (`password = "password"`), password hashes, and values below the
   rule's entropy threshold.
 - Weak dictionary passwords (`admin123`) are reported at low confidence, so

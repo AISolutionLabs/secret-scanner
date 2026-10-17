@@ -286,9 +286,9 @@ func TestConservativeTriageMissedClasses(t *testing.T) {
 	b64 := tok("", 40, 33) + "+/" + tok("", 20, 34) + "=="
 	nextTok := tok("", 56, 35)
 	cases := []tc{
-		{"uuid under a token key", "a.json", `{"access_token": "` + u + `"}`, u, true, false},
-		{"uuid under tokenValue", "a.js", `const tokenValue = "` + u + `";`, u, true, false},
-		{"uuid under Go :=", "a.go", `secretVal := "` + u + `"`, u, true, false},
+		{"uuid under a token key", "a.json", `{"access_token": "` + u + `"}`, u, true, true}, // scan reports it (low)
+		{"uuid under tokenValue", "a.js", `const tokenValue = "` + u + `";`, u, true, true},
+		{"uuid under Go :=", "a.go", `secretVal := "` + u + `"`, u, true, true},
 		{"unquoted hex value", "vectors.txt", "Key = " + h, h, true, true}, // identifier bug fixed for both modes
 		{"pagination-named token", "resp.json", `"nextToken": "` + nextTok + `"`, nextTok, true, false},
 		{"base64 under key = (operator heuristic)", "conf.txt", "key = " + b64, b64, true, false},

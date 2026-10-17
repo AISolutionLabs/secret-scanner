@@ -449,10 +449,6 @@ var shapeOnly = map[string]bool{
 	"allowlist: value read from env/secret store":         true,
 }
 
-// credentialKey matches the end of "<credential-named key> <operator>" before
-// a value: tokenValue = , "SecretID": , secretVal := , api_key", .
-var credentialKey = regexp.MustCompile(`(?i)(?:secret|token|passw|pwd|passphrase|api[_-]?key|apikey|auth|credential|private[_-]?key|access[_-]?key|key)[a-z0-9_]{0,8}["'\x60]?\s*(?::=|=>|[:=,])\s*["'\x60]?$`)
-
 // spare reports whether conservative mode keeps a value a filter would drop.
 func (t *Triager) spare(reason, line string, in Input) bool {
 	if t.Mode != Conservative || !shapeOnly[reason] {
@@ -469,12 +465,12 @@ func (t *Triager) spare(reason, line string, in Input) bool {
 		return false
 	}
 	before := strings.TrimRight(line[max(0, i-80):i], " \t")
-	if !credentialKey.MatchString(before) {
+	if !detect.CredentialKey.MatchString(before) {
 		return false
 	}
 	// UUIDs under request/correlation-style keys are IDs (request_token,
 	// idempotency_key), unlike access_token = <uuid>.
-	if reason == "uuid" && requestIDKey.MatchString(before) {
+	if reason == "uuid" && detect.RequestIDKey.MatchString(before) {
 		return false
 	}
 	return true
@@ -482,7 +478,6 @@ func (t *Triager) spare(reason, line string, in Input) bool {
 
 var (
 	secretReference = regexp.MustCompile(`(?i)(?:^|[_.-])(?:secret|token|password|passwd|key|credentials?)[_.-](?:id|name|ref|path|arn|key)$`)
-	requestIDKey    = regexp.MustCompile(`(?i)(?:request|idempoten|correlation|trace|transaction|session[_-]?id|client[_-]?id|tenant|subscription|object|resource|message)[a-z0-9_-]{0,20}["'\x60]?\s*(?::=|=>|[:=,])\s*["'\x60]?$`)
 )
 
 // providerShaped reports whether any secretscan provider rule matches the
