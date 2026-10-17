@@ -28,6 +28,8 @@ without the fix.
 | 16 | `--verify` | Any 2xx JSON response counted as verified, so a gateway's JSON error document or an empty object marked a secret live; JSON 403 also counted as verified, although GitHub uses 403 for rate limits. Found by an external reviewer. | Each provider declares the fields of its documented success response; anything else is unverified, and 403 is unverified. | `TestVerifierRequiresSuccessShape` |
 | 17 | output files | Report and patch output opened the path with `O_CREATE`, then changed its mode and truncated it, following an existing symlink: a link planted at `-r`/`--fix-patch` (for example in a CI checkout of an untrusted branch) could truncate an unrelated file and make it 0600. `install-hook` and `--fix` also wrote through symlinks. Found by an external reviewer. | Output goes to a new file created exclusively in the destination directory and renamed over the path; symlinks at report and patch paths are refused, symlinked hooks are replaced, `--fix` skips symlinked sources; a failed report write leaves no partial file. | `TestOutputPathsDoNotFollowSymlinks` (links to files inside and outside the repository and to an existing report), `TestReportReplacesHardLink`, `TestInstallHookDoesNotWriteThroughSymlink`, `TestBuildPatchSkipsSymlinks`, `TestReportToDevStdout` |
 | 18 | triage | The report itself was read whole (`os.ReadFile` / `io.ReadAll` of stdin) before parsing, so the 8 MiB source limit did not bound memory for a huge report. Found by an external reviewer. | `--max-report-megabytes` (default 256): files over it are rejected from their size before reading, stdin is read through a capped reader; an oversized report exits 2, never as a clean result. | `TestTriageRejectsOversizedReport` |
+| 19 | triage | trufflehog `SourceMetadata.Data` is a map; the parser took whichever entry Go's map iteration produced last, so a finding naming several locations (`Filesystem` and `Git`) could be checked against a different file or commit on each run, and a decoy file could get a real secret filtered. Found by an external reviewer. | Entries are read in sorted order and used only when they agree or exactly one matches the report's `SourceName`; otherwise the finding stays uncorroborated and no source is read. | `TestTrufflehogSourceIsDeterministic` (every metadata order), `TestTrufflehogConflictingSourceCannotFilter` |
+| 20 | reports | Report fingerprints are unsalted SHA-256: for weak secrets, which secretscan reports on purpose, a report lets anyone confirm guesses offline. Found by an external reviewer (design issue, not an exploit). | Documented as guessable; opt-in keyed `hmac-sha256:` fingerprints (`SECRETSCAN_HASH_KEY`); tests that no output contains a raw secret. | `TestKeyedFingerprints`, `TestRawSecretsNeverInOutput` |
 
 ## Re-verified, no change needed
 
@@ -43,7 +45,14 @@ without the fix.
 - **Report confidentiality**: reports can be streamed (`triage -`); partially
   redacted reports are matched by prefix; unredacted report files and
   group/world-readable files trigger warnings; `--delete-input` removes the
-  report even when triage fails; triage output is redacted by default.
+  report even when triage fails; triage output is redacted by default. No
+  output format, the suppression ledger, the summary or triage output
+  contains a raw secret by default (`TestRawSecretsNeverInOutput`).
+- **Fingerprints**: the default `SecretHash` is an unsalted SHA-256, which
+  lets anyone holding a report confirm a guessed weak secret; reports are
+  therefore written 0600 and documented as sensitive. With
+  `SECRETSCAN_HASH_KEY` every published fingerprint is a keyed
+  `hmac-sha256:` value (`TestKeyedFingerprints`).
 - **Resource bounds**: a triage report over `--max-report-megabytes`
   (default 256) is rejected before parsing, from a file or stdin; source files
   and history blobs it names are read only up to 8 MiB.

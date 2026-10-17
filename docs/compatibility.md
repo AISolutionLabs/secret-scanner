@@ -13,7 +13,7 @@ new major version and a CHANGELOG entry under "Breaking":
 | `stats` report | `schema` is incremented on any incompatible change |
 | Config (`.secretscan.toml`, `.gitleaks.toml`) | existing keys keep their meaning; unknown keys produce a warning so typos are caught |
 | Rule IDs | not renamed; a removed rule is listed in the CHANGELOG |
-| Ignore files and fingerprints | `file:rule:line` and `sha256:` entries keep matching |
+| Ignore files and fingerprints | `file:rule:line`, `sha256:` and `hmac-sha256:` entries keep matching; `SecretHash` is plain SHA-256 hex, or `hmac-sha256:<hex>` when a hash key is set |
 
 **Not** covered, because improving them is the point of minor releases:
 which values a rule matches, noise filters, confidence levels (qualitative

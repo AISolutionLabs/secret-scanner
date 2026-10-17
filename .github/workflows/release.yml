@@ -46,7 +46,15 @@ jobs:
           if [ -f "docs/release-notes/$GITHUB_REF_NAME.md" ]; then
             grep -v '^<!-- /\{0,1\}bench:' "docs/release-notes/$GITHUB_REF_NAME.md" > notes.md
           fi
-          gh release create "$GITHUB_REF_NAME" dist/* --title "secretscan $GITHUB_REF_NAME" --notes-file notes.md --verify-tag
+          # A release created by hand on GitHub (which also creates the tag)
+          # must still get its binaries: upload into it instead of failing.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "::warning::release $GITHUB_REF_NAME already existed (created by hand?); uploading assets and setting notes"
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+            gh release edit "$GITHUB_REF_NAME" --title "secretscan $GITHUB_REF_NAME" --notes-file notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --title "secretscan $GITHUB_REF_NAME" --notes-file notes.md --verify-tag
+          fi
 
   # Install the published release the way the README says, on clean runners,
   # and check that it actually blocks a secret.

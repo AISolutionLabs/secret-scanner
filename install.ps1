@@ -4,7 +4,7 @@
 # Linux and macOS) after verifying its SHA-256 checksum.
 #
 #   irm https://raw.githubusercontent.com/AISolutionLabs/secret-scanner/main/install.ps1 | iex
-#   & ([scriptblock]::Create((irm .../install.ps1))) -Version v1.0.0 -InstallDir C:\tools
+#   & ([scriptblock]::Create((irm .../install.ps1))) -Version v1.1.0 -InstallDir C:\tools
 #
 # Nothing is installed if the download or the checksum check fails. The
 # checksum file is signed by the release workflow with Sigstore (keyless); if

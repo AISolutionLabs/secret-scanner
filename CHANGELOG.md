@@ -4,6 +4,73 @@ All notable changes are listed here. The project follows
 [Semantic Versioning](https://semver.org); see [docs/compatibility.md](docs/compatibility.md)
 for what counts as a breaking change.
 
+## 1.1.0 - 2026-10-17
+
+The first release with published binaries. The v1.0.0 GitHub release was
+created by hand before the release workflow ran, so it has no binaries,
+checksums or signatures (`go install ...@v1.0.0` works); install v1.1.0
+instead. Detection is unchanged from 1.0.0: the detection-code fingerprint
+the benchmark was measured on is identical.
+
+### Fixes
+- `triage` chose a trufflehog finding's source location in Go map order
+  when its `SourceMetadata` named several (for example `Filesystem` and
+  `Git`), so it could check a different file or commit on each run. Entries
+  are now read in a fixed order and used only when they agree, or when
+  exactly one matches the report's `SourceName`; otherwise the finding stays
+  uncorroborated, its evidence lists the conflicting locations, and no
+  source is read for it.
+- Output files are never written through a link: reports, fix patches,
+  hooks and `--fix` rewrites go to a new file in the destination directory
+  that is renamed into place. A symlink at a report or patch path is refused
+  (terminal and pipe links such as `/dev/stdout` still work), a symlinked
+  hook is replaced by a regular file, `--fix` skips symlinked sources, and a
+  failed report write leaves no partial file.
+- `triage --max-report-megabytes N` (default 256): a larger report, from a
+  file or stdin, is rejected before parsing with exit 2.
+
+### Added
+- Keyed secret fingerprints: with `SECRETSCAN_HASH_KEY` (or
+  `--hash-key-file`, at least 16 bytes), every fingerprint written to a
+  report (JSON and CSV `SecretHash`, SARIF `partialFingerprints`) is
+  `hmac-sha256:<hex>`, which cannot be tested against guesses without the
+  key. Keyed ignore entries and keyed baselines match with the same key;
+  plain `sha256:` entries keep working. Without a key reports still carry
+  the plain SHA-256, now documented as guessable for weak secrets.
+- Tests that no raw secret (a weak password, a provider token, a generic
+  key, URL credentials, a private key) appears in any report format, the
+  suppression ledger, the summary, report files or triage output.
+
+### Benchmark integrity and confidence semantics
+- Every published benchmark figure (README, docs, CHANGELOG, release notes,
+  `install-hook`) is generated from `bench/results/latest.json`, and CI
+  checks each one against the row it comes from in the dated results file.
+  It also rejects any percentage published outside a generated passage, and
+  any balanced figure that does not name its `testFixtures` setting. This
+  fixed stale figures: trufflehog in the README (an earlier full-dataset
+  run), detect-secrets' leaky-repo extra lines, two CHANGELOG lines, and a
+  triage figure that had no source row.
+- `bench/breakdown.py`: precision by confidence, path, context, detector
+  family and policy, from the holdout report, with detection and blocking
+  recall separately. Confidence is documented in the CLI help, the SARIF
+  output (`tool.driver.properties.confidenceScale`) and docs/precision.md as
+  a qualitative evidence level, not a probability.
+- Every provider-format rule (86) is tested at test, fixture, example and
+  doc paths, `.env.example` and compose files: none is downgraded or stops
+  blocking under balanced (`TestNoProviderFormatDowngradedByLocation`).
+- [docs/benchmark-policy.md](https://github.com/AISolutionLabs/secret-scanner/blob/v1.1.0/docs/benchmark-policy.md):
+  labels used as given, a register of label disagreements (AWS WAF
+  `ChangeToken`) reported only as a secondary figure, and a protocol for a
+  second independent benchmark. The detection-code fingerprint is recorded
+  with the figures, and a release fails if they were measured on different
+  detection code. `bench/score_labeled.py` scores any line-labeled corpus.
+
+### Release
+- The release workflow publishes into a release that already exists (one
+  created by hand on GitHub) instead of failing: it uploads the binaries,
+  checksums and signature and sets the notes. CONTRIBUTING.md documents
+  releasing: push the tag only.
+
 ## 1.0.0 - 2026-10-17
 
 First public release: 136 rules, gitleaks-compatible config and reports,
@@ -15,13 +82,8 @@ verification, remediation guidance and `explain`. Benchmark results:
 (earlier rounds: 2026-10-15, 2026-10-16).
 
 ### Placeholders, local credentials and new detectors
-<!-- bench:changelog-headline -->
 Designed on CredData's dev half, measured once on its test half: precision
 83.7% -> 91.5%, recall 48.0% -> 59.2% on repositories never used for design.
-Under balanced (`testFixtures = "block"`), 39.9% of labeled secrets block at
-90.2%; gitleaks + triage loses 54 of gitleaks' 1,110 true findings (41
-`ChangeToken`) and removes 27 of its 99 false positives.
-<!-- /bench:changelog-headline -->
 
 - Placeholder credentials (`some_password`, `s3krit-password`, `admin123`,
   `postgres:postgres@`) are dropped with a ledger reason
@@ -49,39 +111,7 @@ Under balanced (`testFixtures = "block"`), 39.9% of labeled secrets block at
 - Rules can declare content validators (`basic-auth`, `opaque-token`); a
   value that fails validation never becomes a finding.
 
-### Benchmark integrity and confidence semantics
-- Every published benchmark figure (README, docs, CHANGELOG, release notes,
-  `install-hook`) is generated from `bench/results/latest.json`, and CI
-  checks each one against the row it comes from in the dated results file.
-  It also rejects any percentage published outside a generated passage, and
-  any balanced figure that does not name its `testFixtures` setting. This
-  fixed stale figures: trufflehog in the README (an earlier full-dataset
-  run), detect-secrets' leaky-repo extra lines, two CHANGELOG lines, and a
-  triage figure that had no source row.
-- `bench/breakdown.py`: precision by confidence, path, context, detector
-  family and policy, from the holdout report, with detection and blocking
-  recall separately. Confidence is documented in the CLI help, the SARIF
-  output (`tool.driver.properties.confidenceScale`) and docs/precision.md as
-  a qualitative evidence level, not a probability.
-- Every provider-format rule (86) is tested at test, fixture, example and
-  doc paths, `.env.example` and compose files: none is downgraded or stops
-  blocking under balanced (`TestNoProviderFormatDowngradedByLocation`).
-- [docs/benchmark-policy.md](https://github.com/AISolutionLabs/secret-scanner/blob/v1.0.0/docs/benchmark-policy.md):
-  labels used as given, a register of label disagreements (AWS WAF
-  `ChangeToken`) reported only as a secondary figure, and a protocol for a
-  second independent benchmark. The detection-code fingerprint is recorded
-  with the figures, and a release fails if they were measured on different
-  detection code. `bench/score_labeled.py` scores any line-labeled corpus.
-
 ### Fixes from an external code review
-- Output files are never written through a link: reports, fix patches,
-  hooks and `--fix` rewrites go to a new file in the destination directory
-  that is renamed into place. A symlink at a report or patch path is refused
-  (terminal and pipe links such as `/dev/stdout` still work), a symlinked
-  hook is replaced by a regular file, `--fix` skips symlinked sources, and a
-  failed report write leaves no partial file.
-- `triage --max-report-megabytes N` (default 256): a larger report, from a
-  file or stdin, is rejected before parsing with exit 2.
 - `triage` enforces its 8 MiB source limit while reading: working-tree
   files are size-checked before reading and read through a capped reader;
   history blobs are size-checked with `git cat-file -s` and streamed with a

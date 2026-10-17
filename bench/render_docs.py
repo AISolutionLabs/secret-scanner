@@ -50,7 +50,14 @@ def num(n):
     return f"{n:,}"
 
 
+def current_version():
+    """The version of the top CHANGELOG section: its release notes carry figures."""
+    m = re.search(r"^## (\d+\.\d+\.\d+)", open(os.path.join(ROOT, "CHANGELOG.md")).read(), re.M)
+    return m.group(1)
+
+
 def regions(d):
+    ver = current_version()
     t, p, tr, s = d["tools"], d["policy"], d["triage"], d["policy_settings"]
     lk, bd = d["leaky_repo"], d["breakdown"]
     rf = d["results_file"]
@@ -156,20 +163,13 @@ the other half, which no change has seen (gitleaks: {num(tr['gitleaks_true'])} t
   conservative mode ({lost_s} in standard mode), {tr['changetoken_lost']} of them AWS WAF
   `ChangeToken` values by design.""",
         },
-        "CHANGELOG.md": {
-            "changelog-headline": f"""Designed on CredData's dev half, measured once on its test half: precision
-{pct(t['secretscan_prev']['precision'])} -> {pct(t['secretscan']['precision'])}, recall {pct(t['secretscan_prev']['recall'])} -> {pct(t['secretscan']['recall'])} on repositories never used for design.
-Under balanced (`testFixtures = "block"`), {pct(p['balanced']['recall'])} of labeled secrets block at
-{pct(p['balanced']['precision'])}; gitleaks + triage loses {lost_c} of gitleaks' {num(tr['gitleaks_true'])} true findings ({tr['changetoken_lost']}
-`ChangeToken`) and removes {tr['gitleaks_false'] - tr['conservative']['false']} of its {tr['gitleaks_false']} false positives.""",
-        },
-        "docs/release-notes/v1.0.0.md": {
+        f"docs/release-notes/v{ver}.md": {
             "release": f"""Samsung CredData, {d['holdout_repos']} repositories never used for design
 (secrets-only labels, default settings):
 
 | Tool | Precision | Recall | F1 |
 |---|---|---|---|
-| **secretscan 1.0.0** | {pct(t['secretscan']['precision'])} | **{pct(t['secretscan']['recall'])}** | **{t['secretscan']['f1']:.3f}** |
+| **secretscan {ver}** | {pct(t['secretscan']['precision'])} | **{pct(t['secretscan']['recall'])}** | **{t['secretscan']['f1']:.3f}** |
 | gitleaks | {pct(t['gitleaks']['precision'])} | {pct(t['gitleaks']['recall'])} | {t['gitleaks']['f1']:.3f} |
 | gitleaks + `secretscan triage` | **{pct(t['gitleaks_triage']['precision'])}** | {pct(t['gitleaks_triage']['recall'])} | {t['gitleaks_triage']['f1']:.3f} |
 | trufflehog {t['trufflehog']['version']} (`--no-verification`) | {pct(t['trufflehog']['precision'])} | {pct(t['trufflehog']['recall'])} | {t['trufflehog']['f1']:.3f} |
@@ -189,7 +189,7 @@ its recall reflects detector coverage, not its usual verified-only workflow.""",
 - In its default conservative mode, triage drops {lost_c} of gitleaks'
   {num(tr['gitleaks_true'])} true findings on unseen repositories. {tr['changetoken_lost']} of those are AWS WAF
   `ChangeToken` values, which are deliberately not treated as
-  credentials ([label policy](https://github.com/AISolutionLabs/secret-scanner/blob/v1.0.0/docs/benchmark-policy.md)).""",
+  credentials ([label policy](https://github.com/AISolutionLabs/secret-scanner/blob/v{ver}/docs/benchmark-policy.md)).""",
         },
     }
 

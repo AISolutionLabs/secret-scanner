@@ -162,6 +162,7 @@ type common struct {
 	exclude       multi
 	ignoreFiles   multi
 	baseline      string
+	hashKeyFile   string
 	format        string
 	reportPath    string
 	redact        int
@@ -217,6 +218,7 @@ func bindCommon(fs *flag.FlagSet, c *common, mode string) {
 	fs.Var(&c.exclude, "exclude-path", "regex of paths to skip (repeatable)")
 	fs.Var(&c.ignoreFiles, "ignore-file", "ignore file of fingerprints / sha256:<hash> / rule:<id>[:file] (default: .secretscanignore, .gitleaksignore)")
 	str(&c.baseline, []string{"b", "baseline-path"}, "", "JSON report of accepted findings to ignore")
+	fs.StringVar(&c.hashKeyFile, "hash-key-file", "", "key for keyed secret fingerprints (hmac-sha256:) in reports; or set SECRETSCAN_HASH_KEY. Without one, reports carry plain SHA-256, which can be guessed for weak secrets")
 	str(&c.format, []string{"f", "report-format"}, "", "text|json|sarif|csv|junit|stats (default: text, or from --report-path extension)")
 	str(&c.reportPath, []string{"r", "report-path"}, "", "write report to this file instead of stdout")
 	c.redact = 80
@@ -350,6 +352,26 @@ func runScan(ctx context.Context, mode string, args []string) int {
 			return exitError
 		}
 	}
+	hk, err := loadHashKey(c.hashKeyFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "secretscan: %v\n", err)
+		return exitError
+	}
+	for _, p := range ignorePaths {
+		if err := hk.addIgnoreFile(p); err != nil {
+			fmt.Fprintf(os.Stderr, "secretscan: ignore file %s: %v\n", p, err)
+			return exitError
+		}
+	}
+	if c.baseline != "" {
+		hk.addBaseline(c.baseline)
+	}
+	if hk.unmatched > 0 {
+		fmt.Fprintf(os.Stderr, "secretscan: warning: %d keyed (hmac-sha256:) ignore entries cannot match without the key; set SECRETSCAN_HASH_KEY or --hash-key-file\n", hk.unmatched)
+	}
+	if hk.baseOnly > 0 {
+		fmt.Fprintf(os.Stderr, "secretscan: warning: the baseline has %d keyed fingerprints; without the key its entries match by location only (a moved secret is reported again)\n", hk.baseOnly)
+	}
 
 	// Worker pool.
 	start := time.Now()
@@ -426,7 +448,7 @@ func runScan(ctx context.Context, mode string, args []string) int {
 	seen := map[string]bool{}
 	var kept []detect.Finding
 	for _, f := range findings {
-		if ignores.Ignored(f) || !detect.MeetsSeverity(f, c.minSeverity) {
+		if ignores.Ignored(f) || hk.ignored(f) || !detect.MeetsSeverity(f, c.minSeverity) {
 			continue
 		}
 		k := f.Fingerprint + "\x00" + f.SecretHash + "\x00" + strconv.Itoa(f.StartColumn)
@@ -526,6 +548,7 @@ func runScan(ctx context.Context, mode string, args []string) int {
 		return a.RuleID < b.RuleID
 	})
 	for i := range kept {
+		hk.publish(&kept[i]) // keyed fingerprint, computed from the raw secret
 		detect.Redact(&kept[i], c.redact)
 	}
 

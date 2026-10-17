@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -46,6 +47,10 @@ type Input struct {
 	// Prefix is the visible part of a partially redacted secret
 	// (gitleaks --redact=N gives "abc...", secretscan gives "abcREDACTED").
 	Prefix string
+	// Unresolved explains why the report does not identify one source
+	// location (for example trufflehog metadata naming several that
+	// disagree). Such a finding is never checked against any file.
+	Unresolved string
 }
 
 // minPrefix is the shortest redaction prefix used for matching.
@@ -165,12 +170,9 @@ func parseTrufflehog(data []byte) (string, []Input, error) {
 		}
 		var r struct {
 			SourceMetadata struct {
-				Data map[string]struct {
-					File   string `json:"file"`
-					Line   int    `json:"line"`
-					Commit string `json:"commit"`
-				} `json:"Data"`
+				Data map[string]json.RawMessage `json:"Data"`
 			}
+			SourceName   string
 			DetectorName string
 			Verified     bool
 			Raw          string
@@ -182,12 +184,73 @@ func parseTrufflehog(data []byte) (string, []Input, error) {
 			continue // log line
 		}
 		in := Input{Tool: "trufflehog", RuleID: r.DetectorName, Secret: r.Raw, Verified: r.Verified}
-		for _, d := range r.SourceMetadata.Data {
-			in.File, in.StartLine, in.Commit = d.File, d.Line, d.Commit
-		}
+		loc, why := trufflehogSource(r.SourceMetadata.Data, r.SourceName)
+		in.File, in.StartLine, in.Commit, in.Unresolved = loc.File, loc.Line, loc.Commit, why
 		out = append(out, finish(in))
 	}
 	return "trufflehog", out, sc.Err()
+}
+
+type thLocation struct {
+	kind   string
+	File   string `json:"file"`
+	Line   int    `json:"line"`
+	Commit string `json:"commit"`
+}
+
+// trufflehogSource picks the one location a trufflehog finding refers to.
+// SourceMetadata.Data is keyed by source kind ("Filesystem", "Git", ...) and
+// normally has one entry. Entries are read in sorted order, never map
+// order. Several entries are used only if they name the same place, or if
+// exactly one matches the report's SourceName ("trufflehog - git");
+// otherwise the finding is left unresolved and no source is read for it.
+func trufflehogSource(data map[string]json.RawMessage, sourceName string) (thLocation, string) {
+	kinds := make([]string, 0, len(data))
+	for k := range data {
+		kinds = append(kinds, k)
+	}
+	sort.Strings(kinds)
+	var locs []thLocation
+	for _, k := range kinds {
+		var l thLocation
+		if json.Unmarshal(data[k], &l) != nil || l.File == "" {
+			continue
+		}
+		l.kind = k
+		locs = append(locs, l)
+	}
+	same := func(a, b thLocation) bool { return a.File == b.File && a.Line == b.Line && a.Commit == b.Commit }
+	switch {
+	case len(locs) == 0:
+		return thLocation{}, "report names no file for this finding"
+	case len(locs) == 1:
+		return locs[0], ""
+	}
+	agree := true
+	for _, l := range locs[1:] {
+		agree = agree && same(l, locs[0])
+	}
+	if agree {
+		return locs[0], ""
+	}
+	origin := strings.ToLower(strings.TrimSpace(sourceName[strings.LastIndex(sourceName, "-")+1:]))
+	var match []thLocation
+	for _, l := range locs {
+		if origin != "" && strings.ToLower(l.kind) == origin {
+			match = append(match, l)
+		}
+	}
+	if len(match) == 1 {
+		return match[0], ""
+	}
+	desc := make([]string, len(locs))
+	for i, l := range locs {
+		desc[i] = fmt.Sprintf("%s %s:%d", l.kind, l.File, l.Line)
+		if l.Commit != "" {
+			desc[i] += "@" + l.Commit[:min(10, len(l.Commit))]
+		}
+	}
+	return thLocation{}, "report names several source locations that disagree (" + strings.Join(desc, "; ") + "); none was read"
 }
 
 func nonEmpty(s, def string) string {
@@ -462,6 +525,11 @@ func (t *Triager) Evaluate(in Input) detect.Finding {
 	if in.Verified {
 		f.Triage, f.Confidence = Verified, detect.High
 		f.Evidence = []string{"verified live by " + in.Tool}
+		return f
+	}
+	if in.Unresolved != "" {
+		f.Triage = Uncorroborated
+		f.Evidence = []string{in.Unresolved + " (kept for review)"}
 		return f
 	}
 	text, why := t.source(in)

@@ -72,3 +72,24 @@ never filter a provider-format token with a word list.
 ## Reporting security issues
 
 See [SECURITY.md](SECURITY.md). Please don't open public issues for vulnerabilities.
+
+## Releasing
+
+1. Add a `## X.Y.Z - date` section at the top of `CHANGELOG.md` and, for a
+   user-facing summary, `docs/release-notes/vX.Y.Z.md` (benchmark figures in
+   it are generated: `python3 bench/render_docs.py`).
+2. Merge to `main` and wait for CI.
+3. Push the tag **only**:
+
+   ```sh
+   git fetch origin && git tag -a vX.Y.Z origin/main -m "secretscan vX.Y.Z" && git push origin vX.Y.Z
+   ```
+
+   Do **not** create the release on GitHub by hand: that creates the tag at
+   whatever `main` is at that moment and publishes a release with no
+   binaries. The `release` workflow builds the binaries, signs `SHA256SUMS`,
+   attaches provenance, publishes the release with the notes, then installs
+   it from scratch on Linux, macOS and Windows. If a release was created by
+   hand anyway, the workflow uploads into it.
+4. A published tag is never moved or deleted: the Go module proxy has cached
+   it. Fix a bad release with a new version.

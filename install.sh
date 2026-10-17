@@ -4,7 +4,7 @@
 # Install a secretscan release binary after verifying its SHA-256 checksum.
 #
 #   curl -fsSL https://raw.githubusercontent.com/AISolutionLabs/secret-scanner/main/install.sh | sh
-#   curl -fsSL .../install.sh | sh -s -- v1.0.0            # a specific version
+#   curl -fsSL .../install.sh | sh -s -- v1.1.0            # a specific version
 #   curl -fsSL .../install.sh | BINDIR=/usr/local/bin sh   # another directory
 #   On Windows use install.ps1.
 #

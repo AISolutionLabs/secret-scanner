@@ -42,8 +42,12 @@ SARIF report.
   structural checks reject identifiers, words, paths, digests, UUIDs and
   published sample credentials. See [How noise is filtered](#how-noise-is-filtered).
 - **Finds hidden secrets**: recursively decodes base64, hex and percent-encoding.
-- **Safe output**: secrets are redacted by default (80% masked); reports
-  carry a SHA-256 of each secret so baselines work without storing secrets.
+- **Safe output**: secrets are redacted by default (80% masked), and report
+  files are written with mode 0600. Reports carry a fingerprint of each
+  secret so baselines work without storing it. A plain SHA-256 fingerprint
+  is not anonymous: anyone with the report can confirm a guessed weak
+  password. Set `SECRETSCAN_HASH_KEY` for keyed `hmac-sha256:` fingerprints,
+  or share `-f stats` (counts only). See [Secret fingerprints](#secret-fingerprints).
 - **Optional live verification** (`--verify`) for GitHub, GitLab, Slack,
   Stripe, OpenAI, Anthropic, Hugging Face, npm, SendGrid, DigitalOcean, Groq and Linear.
 - **Fix guidance**: every finding says how urgent it is (verified-live means
@@ -64,7 +68,7 @@ check fails:
 ```sh
 curl -fsSL https://raw.githubusercontent.com/AISolutionLabs/secret-scanner/main/install.sh | sh
 # a specific version, or another directory
-curl -fsSL https://raw.githubusercontent.com/AISolutionLabs/secret-scanner/main/install.sh | BINDIR=/usr/local/bin sh -s -- v1.0.0
+curl -fsSL https://raw.githubusercontent.com/AISolutionLabs/secret-scanner/main/install.sh | BINDIR=/usr/local/bin sh -s -- v1.1.0
 ```
 
 On Windows (PowerShell), with the same checks:
@@ -77,7 +81,7 @@ Or with Go 1.24+, or a binary from
 [Releases](https://github.com/AISolutionLabs/secret-scanner/releases):
 
 ```sh
-go install github.com/AISolutionLabs/secret-scanner/cmd/secretscan@v1.0.0
+go install github.com/AISolutionLabs/secret-scanner/cmd/secretscan@v1.1.0
 make build            # from a checkout -> bin/secretscan
 ```
 
@@ -227,7 +231,7 @@ With the [pre-commit](https://pre-commit.com) framework, the repo ships a
 ```yaml
 repos:
   - repo: https://github.com/AISolutionLabs/secret-scanner
-    rev: v1.0.0
+    rev: v1.1.0
     hooks:
       - id: secretscan          # staged changes
       - id: secretscan-push     # outgoing commits (stages: [pre-push])
@@ -351,6 +355,24 @@ runbook = "https://wiki.example.com/platform/secrets-rotation"
 `--no-inline-ignore` disables inline markers, and `--no-noise-filters`
 disables the heuristic filters below. Both are useful for audits.
 
+### Secret fingerprints
+
+Every finding carries `SecretHash` (JSON, CSV) and a SARIF
+`partialFingerprints` entry, so ignore entries and baselines can match a
+secret without storing it.
+
+- **Default: plain SHA-256.** Portable (a baseline made anywhere matches
+  anywhere) but not anonymous: hashing likely passwords and comparing
+  recovers weak ones (`Welcome1!`) quickly. Treat such reports, CI
+  artifacts and baselines as secrets.
+- **Keyed: `SECRETSCAN_HASH_KEY=<random, 16+ bytes>`** (or
+  `--hash-key-file FILE`). Every fingerprint written to a report is
+  `hmac-sha256:<hex>` and cannot be tested without the key. Keep the key in
+  your CI secret store. Keyed ignore entries (`hmac-sha256:<hex>` lines in
+  `.secretscanignore`) and keyed baselines need the same key; without it a
+  keyed baseline still matches by location (`file:rule:line`), but a moved
+  secret is reported again. Plain `sha256:` entries keep working either way.
+
 ## Options
 
 ```
@@ -368,6 +390,7 @@ disables the heuristic filters below. Both are useful for audits.
 -r, --report-path FILE       write report to file (format inferred from extension;
                              never written through a symlink, replaced atomically)
     --redact[=N]             mask N% of each secret (default 80; --redact=0 shows all)
+    --hash-key-file FILE     keyed hmac-sha256: fingerprints (or SECRETSCAN_HASH_KEY)
     --exit-code N            exit code on findings (default 1)
     --min-severity LEVEL     info | low | medium | high | critical
     --max-target-megabytes N skip larger files (default 10)
