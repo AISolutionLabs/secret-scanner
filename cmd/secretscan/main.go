@@ -397,18 +397,20 @@ func runScan(ctx context.Context, mode string, args []string) int {
 
 	var srcErr error
 	var fileStats sources.Stats
+	var tooLarge []string // not scanned: --max-target-megabytes
+	noteTooLarge := func(p string) { tooLarge = append(tooLarge, p) }
 	switch mode {
 	case "dir":
 		fileStats, srcErr = sources.Files(ctx, roots, sources.FileOptions{
-			MaxBytes: maxBytes, FollowSymlinks: c.followLinks, Skip: det.SkipPath,
+			MaxBytes: maxBytes, FollowSymlinks: c.followLinks, Skip: det.SkipPath, TooLarge: noteTooLarge,
 		}, emit)
 	case "git":
 		srcErr = sources.Git(ctx, sources.GitOptions{
 			Repo: repo, LogOpts: strings.Fields(c.logOpts), Staged: c.staged, PrePush: c.prePush,
-			Remote: c.remote, Stdin: os.Stdin, MaxBytes: maxBytes,
+			Remote: c.remote, Stdin: os.Stdin, MaxBytes: maxBytes, TooLarge: noteTooLarge,
 		}, emit)
 	case "stdin":
-		srcErr = sources.Reader(os.Stdin, c.label, c.asDiff, maxBytes, emit)
+		srcErr = sources.Reader(os.Stdin, c.label, c.asDiff, maxBytes, emit, noteTooLarge)
 	}
 	close(frags)
 	wg.Wait()
@@ -588,6 +590,16 @@ func runScan(ctx context.Context, mode string, args []string) int {
 		report.Summary(kept), scope, humanBytes(nBytes), time.Since(start).Round(time.Millisecond))
 	if line := report.PolicyLine(kept, policy, hidden, supCount); line != "" {
 		fmt.Fprintln(os.Stderr, line)
+	}
+	if len(tooLarge) > 0 {
+		// A skipped file is not a clean one: say so, even with -q.
+		shown := tooLarge[:min(len(tooLarge), 5)]
+		more := ""
+		if len(tooLarge) > len(shown) {
+			more = fmt.Sprintf(" and %d more", len(tooLarge)-len(shown))
+		}
+		fmt.Fprintf(os.Stderr, "secretscan: warning: %d input(s) over --max-target-megabytes %g were not (fully) scanned: %s%s (raise the limit, or 0 for none)\n",
+			len(tooLarge), c.maxMB, strings.Join(shown, ", "), more)
 	}
 	if c.showSupp {
 		writeSuppressed(os.Stderr, supItems, c.redact)

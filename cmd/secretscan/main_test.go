@@ -572,3 +572,24 @@ func TestTestFixturesPolicy(t *testing.T) {
 		t.Fatalf("a provider token in a test file must block under balanced: %+v", r)
 	}
 }
+
+// Input skipped for --max-target-megabytes is never a silent pass: the scan
+// says which files (or how much of stdin) it did not scan.
+func TestOversizedInputIsReported(t *testing.T) {
+	dir := t.TempDir()
+	big := strings.Repeat("x", 2<<20) + "\nTOKEN = '" + pat() + "'\n"
+	writeFile(t, filepath.Join(dir, "dump.sql"), big)
+	writeFile(t, filepath.Join(dir, "ok.py"), "x = 1\n")
+	r := run(t, dir, "", "dir", ".", "--max-target-megabytes", "1", "-q")
+	if !strings.Contains(r.stderr, "1 input(s) over --max-target-megabytes 1 were not (fully) scanned: dump.sql") {
+		t.Errorf("skipped file not reported: %s", r.stderr)
+	}
+	r = run(t, dir, big, "stdin", "--max-target-megabytes", "1", "-q")
+	if !strings.Contains(r.stderr, "stdin (only the first part was scanned)") {
+		t.Errorf("truncated stdin not reported: %s", r.stderr)
+	}
+	r = run(t, dir, "x = 1\n", "stdin", "-q")
+	if strings.Contains(r.stderr, "were not (fully) scanned") {
+		t.Errorf("small stdin reported as truncated: %s", r.stderr)
+	}
+}

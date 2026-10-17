@@ -20,12 +20,13 @@ const zeroSHA = "0000000000000000000000000000000000000000"
 // GitOptions selects what part of a repository to scan.
 type GitOptions struct {
 	Repo     string
-	LogOpts  []string  // extra `git log` args, e.g. "--since=2024-01-01" or "main~10..main"
-	Staged   bool      // scan only the staged diff (pre-commit)
-	PrePush  bool      // read pre-push refs from Stdin and scan only outgoing commits
-	Remote   string    // remote name passed to the pre-push hook ($1)
-	Stdin    io.Reader // pre-push ref lines
-	MaxBytes int64     // skip files whose added content in a diff exceeds this
+	LogOpts  []string     // extra `git log` args, e.g. "--since=2024-01-01" or "main~10..main"
+	Staged   bool         // scan only the staged diff (pre-commit)
+	PrePush  bool         // read pre-push refs from Stdin and scan only outgoing commits
+	Remote   string       // remote name passed to the pre-push hook ($1)
+	Stdin    io.Reader    // pre-push ref lines
+	MaxBytes int64        // skip files whose added content in a diff exceeds this
+	TooLarge func(string) // told about each file skipped for MaxBytes
 }
 
 // Git streams fragments from a repository.
@@ -60,7 +61,7 @@ func runDiff(ctx context.Context, o GitOptions, emit func(detect.Fragment), args
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("git: %w", err)
 	}
-	perr := ParseDiff(out, o.MaxBytes, emit)
+	perr := ParseDiffLimit(out, o.MaxBytes, emit, o.TooLarge)
 	_, _ = io.Copy(io.Discard, out)
 	werr := cmd.Wait()
 	if perr != nil {
