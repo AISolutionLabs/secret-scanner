@@ -80,6 +80,9 @@ safety, release hygiene):
   skip literals that must stay compile-time constants.
 
 ### Distribution
+- `install.ps1` for Windows (checksum and optional signature verification);
+  installers are tested on Linux, macOS and Windows on every push, and the
+  post-release install test covers Windows.
 - Releases sign `SHA256SUMS` with Sigstore (keyless, bound to the release
   workflow) and attach GitHub build-provenance attestations; `install.sh`
   verifies the signature when cosign is installed

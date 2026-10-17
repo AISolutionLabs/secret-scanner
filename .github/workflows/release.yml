@@ -85,3 +85,46 @@ jobs:
           tok="ghp_$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 36)"
           echo "TOKEN = \"$tok\"" > leak.py && git add leak.py
           if pre-commit run secretscan; then echo "hook did not block"; exit 1; fi
+
+  # The same checks on Windows, through install.ps1.
+  verify-install-windows:
+    needs: release
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: sigstore/cosign-installer@v3
+      - name: install.ps1 (checksum and signature verified)
+        run: |
+          ./install.ps1 -Version $env:GITHUB_REF_NAME -InstallDir "$env:RUNNER_TEMP\bin" -RequireSignature
+          $v = & "$env:RUNNER_TEMP\bin\secretscan.exe" version
+          if ($v -ne "secretscan $env:GITHUB_REF_NAME") { throw "unexpected version: $v" }
+      - name: Build provenance verifies
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download $env:GITHUB_REF_NAME -p secretscan-windows-amd64.exe -D "$env:RUNNER_TEMP\att"
+          gh attestation verify "$env:RUNNER_TEMP\att\secretscan-windows-amd64.exe" --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) { throw "provenance verification failed" }
+      - name: The installed binary blocks a secret and passes clean code
+        run: |
+          $d = Join-Path $env:RUNNER_TEMP 'smoke'; New-Item -ItemType Directory $d | Out-Null; Set-Location $d
+          git init -q
+          'print("hello")' | Set-Content ok.py
+          & "$env:RUNNER_TEMP\bin\secretscan.exe" dir . -q
+          if ($LASTEXITCODE -ne 0) { throw "clean code was blocked" }
+          $chars = [char[]]'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+          $tok = 'ghp_' + -join (1..36 | ForEach-Object { $chars | Get-Random })
+          "TOKEN = `"$tok`"" | Set-Content leak.py
+          & "$env:RUNNER_TEMP\bin\secretscan.exe" dir . -q
+          if ($LASTEXITCODE -ne 1) { throw "secret not blocked (exit $LASTEXITCODE)" }
+      - uses: actions/setup-go@v5
+        with: { go-version: stable }
+      - name: go install at the tag
+        run: |
+          $env:GOBIN = "$env:RUNNER_TEMP\gobin"
+          go install "github.com/$env:GITHUB_REPOSITORY/cmd/secretscan@$env:GITHUB_REF_NAME"
+          $v = & "$env:GOBIN\secretscan.exe" version
+          if ($v -ne "secretscan $env:GITHUB_REF_NAME") { throw "unexpected version: $v" }

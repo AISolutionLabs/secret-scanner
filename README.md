@@ -67,7 +67,13 @@ curl -fsSL https://raw.githubusercontent.com/AISolutionLabs/secret-scanner/main/
 curl -fsSL https://raw.githubusercontent.com/AISolutionLabs/secret-scanner/main/install.sh | BINDIR=/usr/local/bin sh -s -- v1.0.0
 ```
 
-Or with Go 1.24+, or a Windows `.exe` from
+On Windows (PowerShell), with the same checks:
+
+```powershell
+irm https://raw.githubusercontent.com/AISolutionLabs/secret-scanner/main/install.ps1 | iex
+```
+
+Or with Go 1.24+, or a binary from
 [Releases](https://github.com/AISolutionLabs/secret-scanner/releases):
 
 ```sh
@@ -75,9 +81,11 @@ go install github.com/AISolutionLabs/secret-scanner/cmd/secretscan@v1.0.0
 make build            # from a checkout -> bin/secretscan
 ```
 
-Every release is installed from scratch on Linux and macOS by CI after it is
-published, through all three paths above plus the pre-commit hook, and must
-block a freshly generated token.
+Every release is installed from scratch on Linux, macOS and Windows by CI
+after it is published (install script, `go install` at the tag and, on Linux
+and macOS, the pre-commit hook), with the signature required, and must block
+a freshly generated token. The installers are also tested on all three
+systems on every push, including refusing a tampered binary.
 
 **Verifying a release.** `SHA256SUMS` is signed by the release workflow with
 Sigstore (keyless: the signing certificate names this repository's

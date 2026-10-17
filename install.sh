@@ -6,6 +6,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/AISolutionLabs/secret-scanner/main/install.sh | sh
 #   curl -fsSL .../install.sh | sh -s -- v1.0.0            # a specific version
 #   curl -fsSL .../install.sh | BINDIR=/usr/local/bin sh   # another directory
+#   On Windows use install.ps1.
 #
 # Nothing is installed if the download or the checksum check fails.
 #
@@ -48,7 +49,12 @@ else
   die "sha256sum or shasum is required to verify the download"
 fi
 
-if [ "$VERSION" = latest ]; then
+if [ -n "${SECRETSCAN_BASE_URL:-}" ]; then
+  # A mirror (or a local directory in tests) with a release's layout; the
+  # checksum and signature checks still apply.
+  base="$SECRETSCAN_BASE_URL"
+  case "$base" in *://*) ;; *) base="file://$(cd "$base" && pwd)" ;; esac
+elif [ "$VERSION" = latest ]; then
   base="https://github.com/$REPO/releases/latest/download"
 else
   case "$VERSION" in v*) ;; *) VERSION="v$VERSION" ;; esac

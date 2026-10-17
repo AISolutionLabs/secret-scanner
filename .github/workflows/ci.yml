@@ -35,3 +35,46 @@ jobs:
         run: go run ./cmd/secretscan validate -c examples/secretscan.toml
       - name: Scan this repository's history with itself
         run: go run ./cmd/secretscan git --no-color
+
+  # The installers against a locally built release, on every push, so a
+  # broken installer is caught before a release exists.
+  installers:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - name: install.sh (Linux, macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          os=$(uname -s | tr A-Z a-z); arch=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+          rel="$RUNNER_TEMP/rel"; mkdir -p "$rel"
+          go build -ldflags "-X main.version=v0.0.0-ci" -o "$rel/secretscan-$os-$arch" ./cmd/secretscan
+          (cd "$rel" && { command -v sha256sum >/dev/null && sha256sum * || shasum -a 256 *; } > SHA256SUMS)
+          SECRETSCAN_BASE_URL="$rel" BINDIR="$RUNNER_TEMP/bin" sh install.sh
+          "$RUNNER_TEMP/bin/secretscan" version | grep -qx "secretscan v0.0.0-ci"
+          echo tampered >> "$rel/secretscan-$os-$arch"; rm -rf "$RUNNER_TEMP/bin"
+          if SECRETSCAN_BASE_URL="$rel" BINDIR="$RUNNER_TEMP/bin" sh install.sh; then echo "tampered binary installed"; exit 1; fi
+          test ! -e "$RUNNER_TEMP/bin/secretscan"
+      - name: install.ps1 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $rel = Join-Path $env:RUNNER_TEMP 'rel'; New-Item -ItemType Directory $rel | Out-Null
+          go build -ldflags "-X main.version=v0.0.0-ci" -o "$rel\secretscan-windows-amd64.exe" ./cmd/secretscan
+          $h = (Get-FileHash -Algorithm SHA256 "$rel\secretscan-windows-amd64.exe").Hash.ToLower()
+          "$h  secretscan-windows-amd64.exe" | Set-Content "$rel\SHA256SUMS"
+          $env:SECRETSCAN_BASE_URL = $rel
+          ./install.ps1 -InstallDir "$env:RUNNER_TEMP\bin"
+          $v = & "$env:RUNNER_TEMP\bin\secretscan.exe" version
+          if ($v -ne 'secretscan v0.0.0-ci') { throw "unexpected version: $v" }
+          Add-Content "$rel\secretscan-windows-amd64.exe" 'tampered'
+          Remove-Item -Recurse -Force "$env:RUNNER_TEMP\bin"
+          pwsh -NoProfile -File ./install.ps1 -InstallDir "$env:RUNNER_TEMP\bin"
+          if ($LASTEXITCODE -eq 0 -or (Test-Path "$env:RUNNER_TEMP\bin\secretscan.exe")) { throw "tampered binary installed" }
+          $global:LASTEXITCODE = 0 # the failed install above was expected
