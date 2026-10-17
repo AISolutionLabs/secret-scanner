@@ -282,7 +282,9 @@ func DefaultRules() []Rule {
 			Keywords: []string{"://"}, Tags: []string{"credentials", "url"},
 			Allowlists: []Allowlist{
 				placeholderValues,
-				{Description: "documentation hosts", RegexTarget: "match", Regexes: []string{`(?i)@(?:(?:[\w-]+\.)*(?:example\.(?:com|org|net)|localhost|faketld|test|invalid|local)|host|hostname|myhost|some_?dsn|your[\w.-]*)(?:[:/]|$)`}},
+				// Documentation hosts only. Local hosts (localhost, 127.0.0.1, *.local,
+				// compose services) are reported, classified as Context "local".
+				{Description: "documentation hosts", RegexTarget: "match", Regexes: []string{`(?i)@(?:(?:[\w-]+\.)*(?:example\.(?:com|org|net)|faketld|test|invalid)|host|hostname|myhost|some_?dsn|your[\w.-]*)(?:[:/]|$)`}},
 			}},
 		r("jdbc-password", "Password in JDBC URL", "high",
 			`(?i)jdbc:[a-z0-9]+:[^\s"']*?[;?&]password=([^;&\s"']{4,})`, []string{"jdbc:"}, "credentials"),

@@ -67,6 +67,10 @@ type Finding struct {
 	// Blocking is set by the policy: strict blocks every finding, balanced
 	// blocks high and medium confidence and reports low for review.
 	Blocking bool `json:"Blocking"`
+	// Context is "local" (a local/development service: localhost, private
+	// network, docker-compose, .env.test) or "example" (.env.example and
+	// other templates). Such findings are capped at low confidence.
+	Context string `json:"Context,omitempty"`
 	// Source and Triage are set when re-scoring another scanner's report.
 	Source string `json:"Source,omitempty"`
 	Triage string `json:"Triage,omitempty"`
@@ -291,6 +295,12 @@ func (d *Detector) hits(text, lower, path string) ([]hit, []drop) {
 				if rule.Entropy > 0 && ent < entropyFloor(rule, secret) {
 					continue // never qualified: not a suppression
 				}
+				if filters && (rule.Generic || rule.HasTag("credentials")) {
+					if why := credentialValueNoise(rule, sub[m[0]:s], secret); why != "" {
+						dropIt(why)
+						continue
+					}
+				}
 				if filters && rule.Generic && rule.Entropy > 0 {
 					if looksLikeIdentifier(secret, quoted || envishPath.MatchString(path)) {
 						dropIt("identifier")
@@ -445,6 +455,12 @@ func genericNoise(secret string, quoted bool, path string) string {
 	}
 	if segmentsAreWords(secret) {
 		return "word-segments" // oauth-2025-04-20, v2-beta
+	}
+	if testVectorName(secret) {
+		return "test-vector-name" // PrivateKey=KAS-ECC-CDH_P-192_C8, PeerKey=ALICE_cf_sect193r1_PUB
+	}
+	if patternedHex(secret) {
+		return "patterned-hex" // 000102030405...1f, 00112233...ff test patterns
 	}
 	hasDigit := strings.IndexFunc(secret, unicode.IsDigit) >= 0
 	w := wordy.Wordiness(secret)
@@ -1110,6 +1126,10 @@ func (d *Detector) newFinding(rule *config.CompiledRule, f Fragment, h hit, s, e
 		fd.StartLine, fd.StartColumn = position(f.Raw, s, f.StartLine)
 		fd.EndLine, fd.EndColumn = position(f.Raw, e, f.StartLine)
 		fd.Line = truncate(lineText(f.Raw, s), 300)
+	}
+	if rule.Re != nil {
+		ctx, why := findingContext(rule, f.FilePath, h.match, lineText(f.Raw, s))
+		applyContext(&fd, ctx, why)
 	}
 	if fd.Secret != "" {
 		sum := sha256.Sum256([]byte(fd.Secret))

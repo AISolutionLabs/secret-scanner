@@ -26,9 +26,15 @@ const FixtureCap = "capped at low: unstructured value in a test/example file"
 // CLI default) makes balanced also block generic values capped at low only for
 // sitting in a test/example file; "review" lists them instead. Provider
 // formats there are high confidence and always block.
+//
+// Local and example credentials (Context set) never block under balanced:
+// they are listed for review. strict blocks everything.
 func BlocksFinding(policy, testFixtures string, f Finding) bool {
 	if Blocks(policy, f.Confidence) {
 		return true
+	}
+	if f.Context != "" {
+		return false
 	}
 	if testFixtures == "block" {
 		for _, e := range f.Evidence {

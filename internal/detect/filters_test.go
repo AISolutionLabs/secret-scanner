@@ -188,6 +188,14 @@ func TestFalseNegativesPerAlphabet(t *testing.T) {
 		{"base32 upper 32", func(i int) string { return g("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567", 32) }, 0.001, 0.0002},
 		{"password 12-24", func(i int) string { return g(alnum+"!@#$%^&*-_+?", 12+i%13) }, 0.003, 0.0005},
 		{"lower+digits 20-40", func(i int) string { return g("abcdefghijklmnopqrstuvwxyz0123456789", 20+i%21) }, 0.005, 0.0002},
+		// Random tokens around one placeholder-vocabulary word. The placeholder
+		// filters must never fire on them (checked below for every alphabet);
+		// the older word filters (word-like, digit-free-name-or-path) lose
+		// ~0.3% of these, a known limit pinned here so it cannot grow.
+		{"placeholder-vocabulary-adjacent", func(i int) string {
+			w := []string{"password", "Admin", "test", "passwd", "root", "token", "local", "postgres", "Master"}[i%9]
+			return g(alnum, 6+i%8) + []string{"", "-", "_"}[i%3] + w + g(alnum, 6+(i/3)%8)
+		}, 0.001, 0.005},
 	}
 	if testing.Short() || raceEnabled {
 		t.Skip("statistical: needs the full sample; CI runs it in a separate non-race step")
@@ -211,6 +219,12 @@ func TestFalseNegativesPerAlphabet(t *testing.T) {
 			}
 		}
 		rows = append(rows, fmt.Sprintf("| %-20s | %5.3f%% | %5.3f%% | %v |", a.name, 100*float64(lostFilter)/n, 100*float64(lostEntropy)/n, reasons))
+		for _, r := range []string{"placeholder-vocabulary", "echoes-key-name", "user-equals-password", "test-vector-name", "patterned-hex",
+			"hash-of-credential", "public-key-token", "ui-text", "localized-text", "algorithm-name", "oid-bytes-or-version"} {
+			if reasons[r] > 0 {
+				t.Errorf("%s: placeholder/key filter %s removed %d random secrets", a.name, r, reasons[r])
+			}
+		}
 		if float64(lostFilter)/n > a.maxNoise {
 			t.Errorf("%s: noise filters removed %d/%.0f (%v)", a.name, lostFilter, n, reasons)
 		}
@@ -271,7 +285,9 @@ func TestConfigFormatRules(t *testing.T) {
 		}
 	}
 	// Weak dictionary passwords are reported, but not as high confidence.
-	fs := d.Detect(detect.Fragment{Raw: "ADMIN_PASSWORD=admin123", FilePath: ".env"})
+	// (Was admin123: canonical one-word defaults like admin123 / root123 are
+	// now dropped as placeholders, with a ledger entry; see TestDummyValues.)
+	fs := d.Detect(detect.Fragment{Raw: "ADMIN_PASSWORD=adminXq7", FilePath: ".env"})
 	if len(fs) == 0 || fs[0].Confidence == detect.High {
 		t.Errorf("weak password should be reported below high confidence: %+v", fs)
 	}
