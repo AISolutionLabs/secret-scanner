@@ -239,5 +239,54 @@ Results are in [bench/results/](../bench/results/2026-10-15.md).
   secrets under non-credential keys, a literal placeholder word used as a real
   password (`password = "password"`), password hashes, and values below the
   rule's entropy threshold.
-- Weak dictionary passwords (`admin123`) are reported at low confidence, so
-  under balanced they are listed for review rather than blocked.
+- One-word default passwords plus digits (`admin123`, `root@123`,
+  `Welcome@2024`, `P@ssw0rd2023`) are reported at low confidence under
+  password keys outside test, example and documentation files: strict
+  blocks them, balanced lists them for review. In test, example and doc
+  files (including `README*`, `*.md`, `*.txt`) they are dropped as
+  `default-password-in-test-or-doc`.
+
+### Trade-offs that can hide a real credential
+
+These are deliberate. Each is listed in the ledger (`--show-suppressed`)
+when it drops a value; none applies to a provider-specific format.
+
+- **Dropped everywhere, under every policy:**
+  - a placeholder word on its own, including leet spellings: `password`,
+    `P@ssw0rd`, `Passw0rd!`, `letmein`, `admin`;
+  - a value containing a word that says it is fake, with or without
+    digits: `test`, `dummy`, `fake`, `sample`, `example`, `demo`, `mock`,
+    `placeholder`, `changeme`, `invalid`, `some`, `your`, `foo`/`bar`
+    (`Test@1234`, `changeme123`). The global placeholder allowlist also
+    drops any value that *contains* `example`, `sample`, `dummy`,
+    `placeholder`, `changeme`, `redacted` or `notreal`, so a company or
+    product name such as `Samplecorp2024!` or `examplehealth-7Hq9xK` hides
+    the password it is part of;
+  - passphrases made of dictionary words under a password key, with or
+    without digits and separators: `correct horse battery staple`,
+    `purple-monkey-dishwasher-42`, `blue.river.stone.cloud`;
+  - digit-free values with `-`, `_` or `.` under a password key
+    (`rltskqifajd-meyphmdn`), and short low-entropy values under generic keys
+    (`secret-vkinta`);
+  - quoted passwords containing `$`, `<`, `{` or `%` are not candidates
+    (they are read as templates): `Pa$$w0rd`;
+  - all-digit keys (`number-or-date`) and identifier-shaped unquoted values
+    in source code (about 2.5% of random 32-character alphanumeric values
+    assigned without quotes in a `.py`/`.js`/`.go` file).
+- **Reported, but not blocking under balanced** (low confidence; strict
+  blocks):
+  - UUID-shaped values under credential keys (Heroku legacy keys and other
+    UUID API keys are blocked only by their provider rules);
+  - **local context**: credentials for loopback hosts, *private IP
+    addresses* (10/8, 172.16/12, 192.168/16, also in production VPCs),
+    single-label host names (`db`, `redis`, `postgres`: compose service
+    names, but also short production names), single-label mDNS names
+    (`devbox.local`), values in `docker-compose*.yml`, `.env.test`,
+    `.env.dev`, `.env.development` and `.env.ci`, and example context for
+    `.env.example`/`.sample`/`.template`. A `prod`, `production`, `prd` or
+    `live` path segment (`deploy/prod/`, `docker-compose.prod.yml`,
+    `values-production.yaml`) removes every local hint. Multi-label `.local`
+    names (`db.prod.svc.cluster.local`, `sql01.corp.local`) and `.env.local`
+    files are not local.
+- Bearer tokens must contain a digit, or be at least 20 characters of mixed
+  case with high entropy: single-case letter-only tokens are not reported.

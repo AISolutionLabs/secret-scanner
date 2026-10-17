@@ -35,6 +35,11 @@ type Check struct {
 	Basic  func(secret string) (user, pass string)
 	// Interpret overrides status-code handling (e.g. Slack returns 200 + ok:false).
 	Interpret func(status int, body []byte) string
+	// SelfHosted marks token formats that self-managed instances issue too
+	// (GitHub Enterprise Server, GitLab self-managed): a 401 from the public
+	// endpoint only means "not a token of the SaaS", so it is unknown, not
+	// invalid.
+	SelfHosted bool
 }
 
 func bearer(secret string) http.Header {
@@ -43,11 +48,11 @@ func bearer(secret string) http.Header {
 
 // Checks maps rule IDs to verifiers. Endpoints are read-only identity calls.
 var Checks = map[string]Check{
-	"github-pat":              {Method: "GET", URL: "https://api.github.com/user", Header: githubHeader},
-	"github-fine-grained-pat": {Method: "GET", URL: "https://api.github.com/user", Header: githubHeader},
-	"github-oauth":            {Method: "GET", URL: "https://api.github.com/user", Header: githubHeader},
-	"github-app-token":        {Method: "GET", URL: "https://api.github.com/user", Header: githubHeader},
-	"gitlab-pat": {Method: "GET", URL: "https://gitlab.com/api/v4/user",
+	"github-pat":              {Method: "GET", URL: "https://api.github.com/user", Header: githubHeader, SelfHosted: true},
+	"github-fine-grained-pat": {Method: "GET", URL: "https://api.github.com/user", Header: githubHeader, SelfHosted: true},
+	"github-oauth":            {Method: "GET", URL: "https://api.github.com/user", Header: githubHeader, SelfHosted: true},
+	"github-app-token":        {Method: "GET", URL: "https://api.github.com/user", Header: githubHeader, SelfHosted: true},
+	"gitlab-pat": {Method: "GET", URL: "https://gitlab.com/api/v4/user", SelfHosted: true,
 		Header: func(s string) http.Header { return http.Header{"Private-Token": {s}} }},
 	"slack-bot-token":  {Method: "POST", URL: "https://slack.com/api/auth.test", Header: bearer, Interpret: slackOK},
 	"slack-user-token": {Method: "POST", URL: "https://slack.com/api/auth.test", Header: bearer, Interpret: slackOK},
@@ -169,12 +174,18 @@ func (v *Verifier) do(ctx context.Context, c Check, secret string) string {
 	if c.Interpret != nil {
 		return c.Interpret(resp.StatusCode, b)
 	}
+	// Every endpoint here answers in JSON. An HTML or empty answer comes from
+	// something in between (a TLS-inspecting proxy's block or caution page,
+	// a captive portal, a WAF) and proves nothing about the secret.
+	fromAPI := strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "json")
 	switch {
-	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+	case resp.StatusCode >= 200 && resp.StatusCode < 300 && fromAPI:
 		return Verified
+	case resp.StatusCode == 401 && c.SelfHosted:
+		return Unknown // may belong to a self-managed instance
 	case resp.StatusCode == 401:
 		return Invalid
-	case resp.StatusCode == 403:
+	case resp.StatusCode == 403 && fromAPI:
 		// Authenticated but lacking scope still proves the key is live for
 		// most providers; treat as verified.
 		return Verified

@@ -19,6 +19,9 @@ type FileOptions struct {
 	MaxBytes       int64
 	FollowSymlinks bool
 	Skip           func(relPath string) bool // allowlisted paths
+	// TooLarge is told about every file skipped for exceeding MaxBytes, so
+	// the caller can say so: a skipped file is not a clean file.
+	TooLarge func(relPath string)
 }
 
 // Stats counts what a source looked at.
@@ -86,6 +89,9 @@ func Files(ctx context.Context, roots []string, o FileOptions, emit func(detect.
 func scanFile(p, rel string, fi os.FileInfo, o FileOptions, st *Stats, emit func(detect.Fragment)) {
 	if o.MaxBytes > 0 && fi.Size() > o.MaxBytes {
 		st.Skipped++
+		if o.TooLarge != nil {
+			o.TooLarge(rel)
+		}
 		return
 	}
 	data, err := os.ReadFile(p)
@@ -107,21 +113,28 @@ func isBinary(b []byte) bool {
 }
 
 // Reader emits a single fragment for an io.Reader (stdin), or parses it as
-// a unified diff when asDiff is set.
-func Reader(r io.Reader, label string, asDiff bool, maxBytes int64, emit func(detect.Fragment)) error {
+// a unified diff when asDiff is set. Input beyond maxBytes is not scanned;
+// tooLarge (if set) is told the label (or each diff file) when that happens.
+func Reader(r io.Reader, label string, asDiff bool, maxBytes int64, emit func(detect.Fragment), tooLarge func(string)) error {
 	if asDiff {
-		return ParseDiff(r, maxBytes, emit)
+		return ParseDiffLimit(r, maxBytes, emit, tooLarge)
+	}
+	if label == "" {
+		label = "stdin"
 	}
 	lr := io.Reader(r)
 	if maxBytes > 0 {
-		lr = io.LimitReader(r, maxBytes)
+		lr = io.LimitReader(r, maxBytes+1)
 	}
 	data, err := io.ReadAll(lr)
 	if err != nil {
 		return err
 	}
-	if label == "" {
-		label = "stdin"
+	if maxBytes > 0 && int64(len(data)) > maxBytes {
+		data = data[:maxBytes]
+		if tooLarge != nil {
+			tooLarge(label + " (only the first part was scanned)")
+		}
 	}
 	emit(detect.Fragment{Raw: strings.ToValidUTF8(string(data), "�"), FilePath: label, StartLine: 1})
 	return nil

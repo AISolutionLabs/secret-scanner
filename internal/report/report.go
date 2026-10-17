@@ -338,12 +338,25 @@ func SARIF(w io.Writer, fs []detect.Finding, rules []*config.CompiledRule, versi
 		if f.Remediation != nil {
 			props["remediation"] = f.Remediation
 		}
+		// Triage provenance: the tool that reported the finding and the
+		// status secretscan gave it (confirmed, uncorroborated, filtered:
+		// <reason>). Without these a filtered finding reads as a plain note.
+		if f.Source != "" {
+			props["source"] = f.Source
+		}
+		if f.Triage != "" {
+			props["triage"] = f.Triage
+		}
+		fps := map[string]string{"secretscan/v1": f.SecretHash, "fingerprint": f.Fingerprint}
+		if f.Commit != "" {
+			fps["commitSha"] = f.Commit // as gitleaks writes it, so the report can be re-triaged
+		}
 		results = append(results, map[string]any{
 			"ruleId":              f.RuleID,
 			"level":               resultLevel(f),
 			"message":             msg{fmt.Sprintf("%s detected", f.Description)},
 			"locations":           []any{map[string]any{"physicalLocation": phys}},
-			"partialFingerprints": map[string]string{"secretscan/v1": f.SecretHash, "fingerprint": f.Fingerprint},
+			"partialFingerprints": fps,
 			"properties":          props,
 		})
 	}

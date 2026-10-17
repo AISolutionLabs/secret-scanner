@@ -6,6 +6,40 @@ for what counts as a breaking change.
 
 ## Unreleased
 
+Fixes from an adversarial recall and security review:
+
+- One-word default passwords plus digits (`admin@123`, `Welcome@2024`,
+  `P@ssw0rd2023`, `Password1`) under password keys are reported at low
+  confidence outside test, example and doc files instead of being dropped
+  as placeholders (still dropped there, ledger reason
+  `default-password-in-test-or-doc`).
+- Local context no longer applies to Kubernetes service DNS
+  (`*.svc.cluster.local`), other multi-label `.local` names
+  (`sql01.corp.local`), `.env.local` / `.env.*.local`, or any path with a
+  `prod`/`production`/`prd`/`live` segment.
+- `redis://:password@host` (empty user) is reported by `url-credentials`.
+- Placeholder phrases must be the whole value: `mysecretkey_8f2kq` and
+  `yourkey_<random>` are reported.
+- Unquoted values in `.env.*.*`, `.envrc`, Makefiles, systemd units and
+  `.txt` files are literals: random base64 there was dropped as
+  `operator-in-code` about 40% of the time. Base64 starting with `/` or `+`
+  is matched by `generic-api-key`.
+- Digit-free Bearer tokens (long, mixed case, high entropy) are reported;
+  `Authorization: <uuid>` counts as a credential-named key.
+- `--verify`: only a JSON answer verifies (a proxy's HTML block or caution
+  page no longer marks every secret live), and a 401 for GitHub/GitLab
+  tokens is `unverified`, not `invalid`, because self-managed instances
+  issue the same formats.
+- `triage -f sarif` keeps the source tool, triage status and commit, and a
+  filtered value explains a reported finding only when it covers it.
+- `--fix` never rewrites a literal inside a comment, multi-line string or
+  heredoc, Python bytes literals, or constant positions (PHP property and
+  parameter defaults, C# case labels and optional parameters, Java
+  constants used in `case`/annotations, TypeScript enums); Ruby, PHP and
+  shell results are syntax-checked when the interpreter is installed.
+- Inputs skipped for `--max-target-megabytes` (files, stdin tail, diff
+  additions) are reported in the summary instead of passing silently.
+
 - Placeholder credentials (`some_password`, `s3krit-password`, `admin123`,
   `postgres:postgres@`) are dropped with a ledger reason
   (`placeholder-vocabulary`, `echoes-key-name`, `user-equals-password`);

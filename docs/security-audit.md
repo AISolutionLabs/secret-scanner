@@ -17,6 +17,12 @@ without the fix.
 | 5 | `--verify` | The HTTP client followed redirects. On a cross-host redirect Go drops `Authorization` but forwards custom headers, so keys sent as `x-api-key`/`DD-API-KEY` could reach the redirect target. | Redirects are never followed; a redirect answer is `unknown`. | `TestVerifierNeverFollowsRedirects` |
 | 6 | `--fix` | JavaScript, TypeScript, Java and C# replacements yielded `undefined`/`null` when the variable was missing, failing later and far from the cause. | Those replacements now throw `"<VAR> is not set"`; Python and Ruby already raised, shell aborts. Go's `os.Getenv` cannot fail inline and is flagged in the output. | `TestPatchedCodeBehaves` (runs the patched Python, JavaScript and Go programs with and without the variable) |
 | 7 | `--fix` | Literals in Go/C#/PHP `const` declarations, Java annotations, C# attributes and `case` labels were rewritten into runtime calls, which parse but do not compile. | Skipped with a reason. | `TestPatchSkipsConstantContexts` |
+| 8 | `--verify` | Any 2xx or 403 answer meant "verified": a TLS-inspecting proxy's HTML caution page (200) or block page (403), or a captive portal, made every secret for that provider "verified live". | Only a JSON answer can verify; others are `unverified`. | `TestVerifierOnlyTrustsProviderAnswers` |
+| 9 | `--verify` | A 401 from api.github.com / gitlab.com marked GitHub Enterprise Server and self-managed GitLab tokens (same formats) `invalid`, which lowered them to low confidence, so balanced stopped blocking a live enterprise token. | 401 is `unverified` for these rules. | `TestVerifierOnlyTrustsProviderAnswers` |
+| 10 | triage | SARIF output dropped the source tool and the triage status (a filtered finding read as a plain note) and wrote the commit only where the SARIF parser did not read it. | `properties.source`, `properties.triage`, `partialFingerprints.commitSha`; the parser reads them back. | `TestSARIFKeepsTriageProvenance` |
+| 11 | triage | A filtered candidate that merely overlapped a reported value (a placeholder inside a longer reported token) marked the finding filtered. | The filtered value must cover the reported one. | `TestFilteredCandidateMustCoverReportedValue` |
+| 12 | `--fix` | Literals inside comments, Go raw strings, Python triple-quoted strings, JS templates and heredocs were rewritten: the result parsed but the program's data changed (and Go gained an unused import). `rb"…"` became `rbos.environ[…]`. PHP property/parameter defaults, C# mid-line `case` and optional parameters, Java constants used in `case`, TypeScript enum members were rewritten into non-constant expressions. | A lexer requires the literal to be in code; bytes literals and those constant positions are skipped; Ruby/PHP/shell results are syntax-checked (`ruby -c`, `php -l`, `bash -n`) when available. | `TestPatchPreservesBehaviour`, `TestCodeAt` |
+| 13 | scans | Files over `--max-target-megabytes`, the tail of stdin past it, and diff additions past it were skipped with no message and exit 0. | The summary lists what was not scanned. | `TestOversizedInputIsReported` |
 
 ## Re-verified, no change needed
 
@@ -48,4 +54,8 @@ without the fix.
   Rate-limited (`429`) answers are reported as `unknown`, not retried.
 - `--fix` validates syntax, not types: a replacement can still change a
   value's type in dynamically typed code paths. Review the patch and run tests.
+  Java and C# results are never compiled: a `static final` constant used as a
+  `case` label or annotation argument in *another* file stops compiling.
+- `--verify` reports `unverified` for GitHub and GitLab tokens the public
+  endpoint rejects; check self-managed instances yourself.
 - Go replacements return `""` for a missing variable; validate at startup.

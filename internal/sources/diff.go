@@ -27,6 +27,12 @@ var hunkRe = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
 // Hunk line counts are honored, so added lines that look like headers
 // ("+++ ...") are handled correctly.
 func ParseDiff(r io.Reader, maxBytes int64, emit func(detect.Fragment)) error {
+	return ParseDiffLimit(r, maxBytes, emit, nil)
+}
+
+// ParseDiffLimit is ParseDiff that also reports each file whose added
+// content exceeded maxBytes and was therefore not (fully) scanned.
+func ParseDiffLimit(r io.Reader, maxBytes int64, emit func(detect.Fragment), tooLarge func(string)) error {
 	br := bufio.NewReaderSize(r, 1<<20)
 	var (
 		meta             detect.Fragment
@@ -72,8 +78,15 @@ func ParseDiff(r io.Reader, maxBytes int64, emit func(detect.Fragment)) error {
 					blockStart = newLine
 				}
 				fileBytes += int64(len(line))
-				if maxBytes > 0 && fileBytes > maxBytes {
+				if maxBytes > 0 && fileBytes > maxBytes && !skipFile {
 					skipFile = true
+					if tooLarge != nil {
+						name := file
+						if meta.Commit != "" {
+							name = meta.Commit[:min(10, len(meta.Commit))] + ":" + file
+						}
+						tooLarge(name)
+					}
 				}
 				block.WriteString(line[1:])
 				block.WriteByte('\n')

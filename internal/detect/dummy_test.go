@@ -48,11 +48,12 @@ func TestDummyAndKeyFilterAdversarialCases(t *testing.T) {
 				{line: `joomla_database_password: top_secret`, path: "vars.yml"},
 				{line: `password: x-pack-test-password`, path: "elastic.yml"},
 				{line: `GOCOMMERCE_MAILER_PASS=super-secret-password`, path: ".env"},
-				{line: `master_password = "Password1"`, path: "main.tf"},
-				{line: `password: 'admin123'`, path: "e2e.js"},
-				{line: `final String password = "pass123";`, path: "A.java"},
-				{line: `MYSQL_ROOT_PASSWORD: root123`, path: "values.yaml"},
-				{line: `SentinelPassword: "abc123",`, path: "a.go"},
+				// one-word defaults plus digits in test and doc files (elsewhere
+				// they are reported at low: TestDefaultPasswordsReportedLow)
+				{line: `password: 'admin123'`, path: "test/e2e.js"},
+				{line: `final String password = "pass123";`, path: "src/test/java/A.java"},
+				{line: `MYSQL_ROOT_PASSWORD: root123`, path: "README.md"},
+				{line: `SentinelPassword: "abc123",`, path: "a_test.go"},
 				{line: `password: 'testpwd1',`, path: "spec.js"},
 				{line: `token := "my-s3cr3t-t0ken" // fake`, path: "a.go"},
 				{line: `password = "SuperSecretPassw0rd"`},
@@ -64,8 +65,8 @@ func TestDummyAndKeyFilterAdversarialCases(t *testing.T) {
 				// vocabulary on their own.
 				{line: `const string expectedAccessToken2 = "LET_ME_IN-2";`, path: "a.cs", want: true},
 				{line: `POSTGRES_PASSWORD: grafanatest`, path: "values.yaml", want: true},
-				// Canonical default passwords are dropped even in a real .env file.
-				{line: "ADMIN_PASSWORD=admin123", path: ".env", want: false},
+				// Canonical default passwords are reported (low) in a real .env file.
+				{line: "ADMIN_PASSWORD=admin123", path: ".env", want: true},
 			},
 		},
 		"echoes-key-name": {
@@ -177,7 +178,7 @@ func TestDummyValuesInLedger(t *testing.T) {
 	cfg, _, _ := config.Resolve(config.Options{})
 	rs, _ := config.Compile(cfg)
 	d := detect.New(rs, detect.Options{RecordSuppressed: true})
-	res := d.Scan(detect.Fragment{Raw: "password: some_password\nADMIN_PASSWORD: admin123\n", FilePath: "values.yaml"})
+	res := d.Scan(detect.Fragment{Raw: "password: some_password\nADMIN_PASSWORD: admin123\n", FilePath: "test/values.yaml"})
 	if len(res.Findings) != 0 {
 		t.Fatalf("placeholders reported: %v", ids(res.Findings))
 	}
@@ -185,7 +186,7 @@ func TestDummyValuesInLedger(t *testing.T) {
 	for _, s := range res.Suppressed {
 		lines[s.StartLine] = s.Reason
 	}
-	if lines[1] != "placeholder-vocabulary" || lines[2] != "placeholder-vocabulary" {
+	if lines[1] != "placeholder-vocabulary" || lines[2] != detect.DefaultPasswordReason {
 		t.Errorf("ledger: %+v", res.Suppressed)
 	}
 }
