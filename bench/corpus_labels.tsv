@@ -29,4 +29,4 @@ example-credential	generic-api-key	kubernetes.*_test\.py	.	refresh token in a ku
 example-credential	password-assignment	axios.*README|ansible.*lookup/url\.py|pydantic	.	passwords in documentation examples
 example-credential	url-credentials	sqlalchemy|mongoose|httpx|pydantic	.	user:password URLs in docstrings and URL-parsing tests
 example-credential	http-basic-auth	requests.*tests/|botocore.*tests/	.	HTTP Basic headers in unit tests (test:test, RFC 7617 aladdin:opensesame, non-ASCII user:password)
-not-a-secret	url-credentials	next-16\.4\.1/.*server\.runtime\.prod\.js	^key_1234$	dotenv docs placeholder (dotenv://:key_1234@dotenv.org) bundled in Next.js
+not-a-secret	url-credentials	next-16\.4\.1/.*server\.runtime\.prod\.js	^key_1234$	dotenv documentation placeholder for DOTENV_KEY (empty user, password key_1234) bundled in Next.js
