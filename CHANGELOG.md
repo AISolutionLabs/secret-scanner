@@ -4,6 +4,20 @@ All notable changes are listed here. The project follows
 [Semantic Versioning](https://semver.org); see [docs/compatibility.md](docs/compatibility.md)
 for what counts as a breaking change.
 
+## Unreleased
+
+- Placeholder credentials (`some_password`, `s3krit-password`, `admin123`,
+  `postgres:postgres@`) are dropped with a ledger reason
+  (`placeholder-vocabulary`, `echoes-key-name`, `user-equals-password`);
+  so are digests under hash keys, .NET `PublicKeyToken`s, translated UI
+  strings, algorithm names, crypto test-vector key names and patterned hex.
+  Word+number passwords other than one-word defaults are still reported.
+- New `Context` field (`local` / `example`): credentials for localhost,
+  private networks, `*.local` and compose service hosts, and values in
+  docker-compose files, `.env.example` and `.env.test`, are reported at low
+  confidence and listed for review under `balanced` (strict still blocks).
+  URL credentials to local hosts were previously allowlisted silently.
+
 ## 1.0.0 - 2026-10-15
 
 First public release: 129 rules, gitleaks-compatible config and reports,

@@ -143,6 +143,9 @@ func Text(w io.Writer, fs []detect.Finding, o Options) error {
 		if f.Confidence != "" {
 			conf = "·" + f.Confidence
 		}
+		if f.Context != "" {
+			conf += "·" + f.Context // local / example credential: review under balanced
+		}
 		fmt.Fprintf(w, "%s %s %s  %s\n", c(cBold+sevColor(f.Severity), "["+strings.ToUpper(f.Severity)+conf+"]"),
 			c(cBold, f.RuleID), c(cDim, f.Description), loc)
 		if f.Secret != "" {
@@ -153,6 +156,9 @@ func Text(w io.Writer, fs []detect.Finding, o Options) error {
 		}
 		if f.Decoded != "" {
 			fmt.Fprintf(w, "    decoded: %s\n", f.Decoded)
+		}
+		if f.Context != "" {
+			fmt.Fprintf(w, "    context: %s\n", contextNote(f))
 		}
 		if f.Commit != "" {
 			fmt.Fprintf(w, "    commit:  %s  %s <%s>  %s\n", short(f.Commit), f.Author, f.Email, f.Date)
@@ -174,6 +180,18 @@ func Text(w io.Writer, fs []detect.Finding, o Options) error {
 		fmt.Fprintf(w, "    ignore:  %s\n\n", c(cDim, f.Fingerprint))
 	}
 	return nil
+}
+
+// contextNote explains a local/example classification.
+func contextNote(f detect.Finding) string {
+	note := f.Context
+	switch f.Context {
+	case detect.ContextLocal:
+		note = "local (credential for a local/development service; rotate it if it is reused anywhere real)"
+	case detect.ContextExample:
+		note = "example (in an example/template file; make sure it is not a real value)"
+	}
+	return note
 }
 
 func oneLine(s string, n int) string {
@@ -310,7 +328,7 @@ func SARIF(w io.Writer, fs []detect.Finding, rules []*config.CompiledRule, versi
 		if len(region) > 0 {
 			phys["region"] = region
 		}
-		props := map[string]any{"confidence": f.Confidence, "evidence": f.Evidence, "blocking": f.Blocking, "commit": f.Commit, "author": f.Author, "email": f.Email, "date": f.Date, "entropy": f.Entropy}
+		props := map[string]any{"context": f.Context, "confidence": f.Confidence, "evidence": f.Evidence, "blocking": f.Blocking, "commit": f.Commit, "author": f.Author, "email": f.Email, "date": f.Date, "entropy": f.Entropy}
 		if f.Decoded != "" {
 			props["decoded"] = f.Decoded
 		}
