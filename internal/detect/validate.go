@@ -8,6 +8,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/AISolutionLabs/secret-scanner/internal/wordy"
 )
 
 // validators are the content checks rules name in config.Rule.Validate.
@@ -82,6 +84,12 @@ func validOpaqueToken(secret string) (bool, string) {
 	core := strings.TrimRight(secret, "=")
 	hasDigit := strings.IndexFunc(core, unicode.IsDigit) >= 0
 	hasLetter := strings.IndexFunc(core, unicode.IsLetter) >= 0
+	// Random tokens without a digit are common: 3% of 20-character and 0.4%
+	// of 32-character alphanumeric tokens have none. A digit-free value
+	// qualifies when it is long, mixed-case, high-entropy and not words.
+	if !hasDigit && hasLetter && digitFreeToken(core) {
+		hasDigit = true
+	}
 	if !hasDigit || !hasLetter || Shannon(core) < 3.0 {
 		return false, ""
 	}
@@ -90,4 +98,21 @@ func validOpaqueToken(secret string) (bool, string) {
 		return false, ""
 	}
 	return true, "token-shaped value (mixed letters and digits, not words or an identifier)"
+}
+
+// digitFreeToken reports long mixed-case random-looking values without
+// digits (Bearer tokens drawn from a letters-heavy alphabet). Placeholders
+// (YOUR_ACCESS_TOKEN, someAccessTokenValue) are single-case or read as
+// words, and are still rejected by the identifier and word checks.
+func digitFreeToken(s string) bool {
+	upper, lower := 0, 0
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c >= 'A' && c <= 'Z':
+			upper++
+		case c >= 'a' && c <= 'z':
+			lower++
+		}
+	}
+	return len(s) >= 20 && upper >= 3 && lower >= 3 && Shannon(s) >= 3.8 && wordy.Wordiness(s) < 0.5
 }

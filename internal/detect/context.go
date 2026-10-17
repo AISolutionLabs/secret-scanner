@@ -22,7 +22,15 @@ var (
 	// docker-compose.yml, docker-compose.override.yaml, compose.yaml, compose.dev.yml
 	composePath = regexp.MustCompile(`(?i)(?:^|/)(?:docker-)?compose(?:[._-][\w.-]*)?\.ya?ml$`)
 	envExample  = regexp.MustCompile(`(?i)(?:^|/)\.env\.(?:example|sample|template|tmpl|tpl|dist|defaults?|skel)$|(?:^|/)(?:example|sample|template)\.env$|\.env\.(?:example|sample|template|dist)\.[\w]+$`)
-	envLocal    = regexp.MustCompile(`(?i)(?:^|/)\.env\.(?:test|testing|local|dev|development|ci)(?:\.local)?$`)
+	// .env.local and .env.*.local are not here: frameworks (Next.js, Vite,
+	// Create React App) load them in every environment and they are where
+	// developers are told to put their real keys.
+	envLocal = regexp.MustCompile(`(?i)(?:^|/)\.env\.(?:test|testing|dev|development|ci)$`)
+	// A production marker in the path (deploy/prod/, values-production.yaml,
+	// docker-compose.prod.yml) overrides every local hint: production
+	// services are reached through compose files, sidecar proxies on
+	// localhost and private addresses too.
+	prodPath = regexp.MustCompile(`(?i)(?:^|[/._-])(?:prod|production|prd|live)(?:[/._-]|$)`)
 	// Single-label hosts that are docker-compose / dev-environment service names.
 	serviceHosts = map[string]bool{"db": true, "database": true, "postgres": true, "postgresql": true, "pg": true, "mysql": true,
 		"mariadb": true, "redis": true, "mongo": true, "mongodb": true, "rabbitmq": true, "rabbit": true, "elasticsearch": true,
@@ -34,15 +42,21 @@ var (
 )
 
 // localHost reports loopback, private, link-local and unspecified addresses,
-// .local/.localhost names and docker-compose service names.
+// .localhost names, single-label mDNS names (devbox.local) and
+// docker-compose service names. Multi-label .local names are not local:
+// Kubernetes service DNS (db.prod.svc.cluster.local) and Active Directory
+// domains (sql01.corp.local) name production hosts.
 func localHost(h string) bool {
 	h = strings.ToLower(strings.Trim(h, "[]."))
 	if h == "" {
 		return false
 	}
 	if h == "localhost" || h == "(local)" || h == "(localdb)" || strings.HasPrefix(h, "(localdb)") ||
-		strings.HasSuffix(h, ".localhost") || strings.HasSuffix(h, ".local") || h == "host.docker.internal" {
+		strings.HasSuffix(h, ".localhost") || h == "host.docker.internal" {
 		return true
+	}
+	if name, ok := strings.CutSuffix(h, ".local"); ok {
+		return name != "" && !strings.Contains(name, ".")
 	}
 	if a, err := netip.ParseAddr(h); err == nil {
 		return a.IsLoopback() || a.IsPrivate() || a.IsUnspecified() || a.IsLinkLocalUnicast()
@@ -59,6 +73,8 @@ func findingContext(rule *config.CompiledRule, path, match, line string) (string
 	switch {
 	case envExample.MatchString(path):
 		return ContextExample, "in an example/template env file"
+	case prodPath.MatchString(path):
+		return "", ""
 	case envLocal.MatchString(path):
 		return ContextLocal, "in a local/test env file"
 	case composePath.MatchString(path):

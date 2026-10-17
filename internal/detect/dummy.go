@@ -177,14 +177,45 @@ func dummyReason(key, value string) string {
 		return ""
 	}
 	// Words plus a number (Password1, admin123, SuperSecretPassword2024) are
-	// what weak real passwords look like too. Only the canonical one-word
-	// defaults (admin123, root123, pass123, letmein1, hunter2) and values that
-	// say they are fake (testpwd1, s3krit-password2) count as dummies.
-	if digits > 0 && !(vocab == 1 && len(unknown) == 0 && single == 0 && wholeWord) && !placeholderMarker(v) {
+	// what weak real passwords look like too. Values that say they are fake
+	// (testpwd1, s3krit-password2) are dummies. The canonical one-word
+	// defaults plus digits (admin123, root@123, Welcome@2024, P@ssw0rd1) are
+	// as often real weak passwords as doc placeholders: see
+	// DefaultPasswordReason.
+	if digits > 0 && !placeholderMarker(v) {
+		if vocab == 1 && len(unknown) == 0 && single == 0 && wholeWord {
+			return DefaultPasswordReason
+		}
 		return ""
 	}
 	return "placeholder-vocabulary"
 }
+
+// DefaultPasswordReason is the ledger reason for a one-word default
+// password plus digits (admin123, Welcome@2024) in a test, example or
+// documentation file, where it is dropped. Elsewhere it is reported at low
+// confidence with DefaultPasswordEvidence: production configs really do
+// contain these, and an attacker tries them first.
+const DefaultPasswordReason = "default-password-in-test-or-doc"
+
+// DefaultPasswordEvidence is the evidence line of a default password
+// reported outside test, example and documentation files.
+const DefaultPasswordEvidence = "common default password plus digits (admin123, Welcome@2024): reported at low confidence, it may be a placeholder or a real weak password"
+
+// passwordContext reports a password rule (password-assignment, SQL and
+// command-line passwords, URL credentials) or a password-named key; a
+// default-password shape under a token or API-key name ("access token:
+// abcdef123456") stays a placeholder.
+func passwordContext(rule *config.CompiledRule, before string) bool {
+	return rule.HasTag("password") || rule.HasTag("url") || strings.Contains(rule.ID, "password") ||
+		passwordKey.MatchString(keyName(before))
+}
+
+var passwordKey = regexp.MustCompile(`(?i)pass|pwd`)
+
+// docFile matches prose documentation, where default passwords are
+// examples (README.md, docs pages).
+var docFile = regexp.MustCompile(`(?i)\.(?:md|markdown|mdx|rst|adoc|asciidoc|txt)$|(?:^|/)readme[^/]*$`)
 
 // Words that mark a value as made up for docs or tests (not merely weak).
 var markerWords = []string{"test", "dummy", "fake", "sample", "example", "demo", "mock", "placeholder", "changeme",

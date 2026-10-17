@@ -291,7 +291,7 @@ func TestConservativeTriageMissedClasses(t *testing.T) {
 		{"uuid under Go :=", "a.go", `secretVal := "` + u + `"`, u, true, true},
 		{"unquoted hex value", "vectors.txt", "Key = " + h, h, true, true}, // identifier bug fixed for both modes
 		{"pagination-named token", "resp.json", `"nextToken": "` + nextTok + `"`, nextTok, true, false},
-		{"base64 under key = (operator heuristic)", "conf.txt", "key = " + b64, b64, true, false},
+		{"base64 under key = (operator heuristic)", "conf.txt", "key = " + b64, b64, true, true}, // scan reports it: .txt values are literals, + and / are base64
 		{"literal default of getenv", "settings.py", `"cookie_secret": os.getenv("cookie_secret", "` + tok("", 32, 36) + `"),`, tok("", 32, 36), true, false},
 		// Must stay filtered in both modes.
 		{"value that names a secret", "Jenkinsfile", "    [envVar: 'TF_VAR_APPROLESECRETID', vaultKey: 'inf-vsqt-01-secret-id']]]]) {", "inf-vsqt-01-secret-id", false, false},

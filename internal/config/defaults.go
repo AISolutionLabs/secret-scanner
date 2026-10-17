@@ -289,7 +289,8 @@ func DefaultRules() []Rule {
 
 		// --- Credentials in URLs / connection strings ---------------------
 		{ID: "url-credentials", Description: "Password embedded in a URL (DB, broker, git, HTTP)", Severity: "high",
-			Regex:    `\b[a-zA-Z][a-zA-Z0-9+.-]{1,20}://[^:/?#@\s'"\x60]{1,64}:([^@/?#\s'"\x60]{3,128})@[a-zA-Z0-9.-]+`,
+			// The user may be empty: redis://:password@host is Redis's own form.
+			Regex:    `\b[a-zA-Z][a-zA-Z0-9+.-]{1,20}://[^:/?#@\s'"\x60]{0,64}:([^@/?#\s'"\x60]{3,128})@[a-zA-Z0-9.-]+`,
 			Keywords: []string{"://"}, Tags: []string{"credentials", "url"},
 			Allowlists: []Allowlist{
 				placeholderValues,
@@ -314,7 +315,7 @@ func DefaultRules() []Rule {
 		// --- Generic (lowest priority, yields to specific rules) ----------
 		{ID: "generic-api-key", Description: "Generic API key, token or secret", Severity: "medium", Entropy: 3.5,
 			Regex: semi([]string{`access`, `auth`, `(?-i:[Aa]pi|API)`, `credential`, `creds`, `key`, `passw(?:or)?d`, `secret`, `token`},
-				`[\w.=!@#%^&*+~?$-]{10,150}|[a-z0-9][a-z0-9+/]{11,}={0,3}`, true),
+				`[\w.=!@#%^&*+~?$-]{10,150}|[a-z0-9+/][a-z0-9+/]{11,}={0,3}`, true),
 			Keywords: []string{"access", "api", "auth", "key", "credential", "creds", "passwd", "password", "secret", "token"},
 			Tags:     []string{"generic"},
 			Allowlists: []Allowlist{{Description: "signature algorithm and auth scheme names", Regexes: []string{`(?i)^(?:AWS4-HMAC-SHA256|GOOG4-RSA-SHA256|HMAC-SHA(?:1|224|256|384|512)|RSA-SHA(?:1|256|512)|ECDSA-SHA256|Bearer|Basic|Digest|Negotiate)$`}},
@@ -510,7 +511,10 @@ func DefaultAllowlists() []Allowlist {
 			`^\$\{[^}]*\}$`, `^\$\([^)]*\)$`, `^\{\{.*\}\}$`, `^<[^>]+>$`, `^%[A-Za-z_]+%$`, `^\$[A-Z_][A-Z0-9_]*$`,
 			`^\{[A-Za-z_][\w.]*\}$`, `^%\(\w+\)s$`, `^@[A-Za-z_]\w*@$`, `^#\{[^}]+\}$`,
 			`^[*xX#•.]+$`,
-			`(?i)^(?:your|my|insert|replace|enter|put)[_-]?(?:own[_-]?|real[_-]?|actual[_-]?)?(?:api[_-]?|access[_-]?|secret[_-]?)?(?:key|token|secret|password|pass|value|here)`,
+			// The whole value must be the placeholder phrase (your_api_key_here,
+			// YOUR_TOKEN, my-secret-key-123): a random tail after it
+			// (mysecretkey_8f2kq) is how real keys get named.
+			`(?i)^(?:your|my|insert|replace|enter|put)[_-]?(?:own[_-]?|real[_-]?|actual[_-]?)?(?:api[_-]?|access[_-]?|secret[_-]?)?(?:key|token|secret|password|pass|value|here)(?:[_-]?(?:here|goes[_-]?here|value|x+|\*+|\d{1,4}))*$`,
 			`(?i)(?:example|sample|dummy|placeholder|changeme|redacted|notreal|not_a_real|fake_?(?:key|token|secret))`,
 		}},
 	}

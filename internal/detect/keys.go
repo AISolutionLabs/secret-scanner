@@ -11,8 +11,8 @@ import (
 // "<key> <operator>" text immediately before a value.
 
 // CredentialKey matches a credential-named key before a value:
-// tokenValue = , "SecretID": , secretVal := , api_key", .
-var CredentialKey = regexp.MustCompile(`(?i)(?:secret|token|passw|pwd|passphrase|api[_-]?key|apikey|auth|credential|private[_-]?key|access[_-]?key|key)[a-z0-9_]{0,8}["'\x60]?\s*(?::=|=>|[:=,])\s*["'\x60]?$`)
+// tokenValue = , "SecretID": , secretVal := , api_key", , Authorization: .
+var CredentialKey = regexp.MustCompile(`(?i)(?:secret|token|passw|pwd|passphrase|api[_-]?key|apikey|auth(?:orization)?|credential|private[_-]?key|access[_-]?key|key)[a-z0-9_]{0,8}["'\x60]?\s*(?::=|=>|[:=,])\s*["'\x60]?$`)
 
 // RequestIDKey matches keys whose values are identifiers even when the name
 // contains "token" or "key": request/correlation/idempotency tokens,

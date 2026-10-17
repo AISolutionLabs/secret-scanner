@@ -39,8 +39,8 @@ func TestSQLPassword(t *testing.T) {
 		// borderline (pinned)
 		{text: `ALTER USER 'test'@'1.1.1.1' IDENTIFIED WITH 'mysql_native_password' AS '*` + g2(hexs, 40) + `';`, want: true,
 			why: "a mysql_native_password hash authenticates in the native protocol (pass-the-hash), so it is reported"},
-		{text: `CREATE USER db1 WITH PASSWORD 'db1';`, want: false,
-			why: "password equal to the user name: dropped as a placeholder (ledger reason placeholder-vocabulary); a real weak credential like this is the accepted cost"},
+		{text: `CREATE USER db1 WITH PASSWORD 'db1';`, want: true,
+			why: "one-word default plus digit outside test/doc files: reported at low confidence (DefaultPasswordEvidence), listed for review under balanced"},
 	})
 }
 

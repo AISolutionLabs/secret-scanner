@@ -301,7 +301,7 @@ func (d *Detector) hits(text, lower, path string) ([]hit, []drop) {
 					continue // never qualified: not a suppression
 				}
 				var extra []string
-				uuidCred := false
+				uuidCred, defaultPassword := false, false
 				if rule.Validate != "" {
 					ok, why := validators[rule.Validate](secret)
 					if !ok {
@@ -311,8 +311,14 @@ func (d *Detector) hits(text, lower, path string) ([]hit, []drop) {
 				}
 				if filters && (rule.Generic || rule.HasTag("credentials")) {
 					if why := credentialValueNoise(rule, sub[m[0]:s], secret); why != "" {
-						dropIt(why)
-						continue
+						// admin123 / Welcome@2024 outside tests and docs: kept at
+						// low confidence (see DefaultPasswordReason).
+						if why == DefaultPasswordReason && passwordContext(rule, sub[m[0]:s]) && !IsTestPath(path) && !docFile.MatchString(path) {
+							defaultPassword = true
+						} else {
+							dropIt(why)
+							continue
+						}
 					}
 				}
 				if filters && rule.Generic && rule.Entropy > 0 {
@@ -352,6 +358,9 @@ func (d *Detector) hits(text, lower, path string) ([]hit, []drop) {
 				conf, ev := assess(rule, secret, quoted, path, ent, extra...)
 				if uuidCred {
 					conf, ev = Low, append(ev, UUIDCredentialEvidence)
+				}
+				if defaultPassword {
+					conf, ev = Low, append(ev, DefaultPasswordEvidence)
 				}
 				hs = append(hs, hit{rule: rule, mStart: w[0] + m[0], mEnd: w[0] + m[1], sStart: w[0] + s, sEnd: w[0] + e,
 					match: strings.TrimSpace(sub[m[0]:m[1]]), secret: secret, entropy: ent, confidence: conf, evidence: ev})
@@ -457,7 +466,10 @@ func keywordWindows(lower string, keys []int, lens []int, rule *config.CompiledR
 	return merged
 }
 
-var envishPath = regexp.MustCompile(`(?i)(?:^|/)(?:\.env(?:\.[\w-]+)?|[\w.-]*\.env|[\w.-]*(?:dockerfile|containerfile)[\w.-]*)$|\.(?:ya?ml|properties|ini|conf|cfg|toml|sh|bash|zsh|ps1|tfvars|hcl|config|xml)$`)
+// envishPath matches files whose values are unquoted literals: env files
+// (also .env.production.local, .envrc, app.env.j2 templates), Dockerfiles,
+// Makefiles, systemd units, plain-text notes and config formats.
+var envishPath = regexp.MustCompile(`(?i)(?:^|/)(?:\.env(?:\.[\w-]+)*|\.envrc|[\w.-]*\.env(?:\.[\w-]+)?|[\w.-]*(?:dockerfile|containerfile)[\w.-]*|(?:gnu)?makefile)$|\.(?:ya?ml|properties|ini|conf|cfg|toml|sh|bash|zsh|ps1|tfvars|hcl|config|xml|mk|service|txt)$`)
 
 const pwSymbols = "!@#%^&*+~?$"
 
@@ -529,10 +541,21 @@ func genericNoise(secret string, quoted bool, path string) string {
 	if !hasDigit && (w >= 0.75 || (clean && w >= 0.5) || (lettersAndSeps(secret) && w >= 0.5)) {
 		return "digit-free-name-or-path" // esnext.map.group-by
 	}
-	if strings.ContainsAny(secret, pwSymbols) && !quoted && !envishPath.MatchString(path) {
+	if strings.ContainsAny(secret, pwSymbols) && !quoted && !envishPath.MatchString(path) && !randomBase64(secret) {
 		return "operator-in-code" // a*b+c; symbols only count in literals/env files
 	}
 	return ""
+}
+
+// randomBase64 reports long, high-entropy base64 with all three character
+// classes: + and / there are base64 digits, not operators (a*b+c and
+// width/2+x are short or low-entropy).
+func randomBase64(s string) bool {
+	core := strings.TrimRight(s, "=")
+	if len(core) < 20 || strings.Trim(core, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/") != "" {
+		return false
+	}
+	return charClasses(core) >= 3 && Shannon(core) >= 4.0
 }
 
 func isKnownPublic(secret string) bool {
