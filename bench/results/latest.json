@@ -1,0 +1,27 @@
+{
+  "_comment": "Headline benchmark figures quoted in README.md, docs/precision.md and the install-hook message. Edit here only, then run: python3 bench/render_docs.py (CI runs it with --check). All figures are CredData secrets-only labels on the test half (repositories never used for design) unless the key says otherwise.",
+  "results_file": "bench/results/2026-10-17.md",
+  "date": "2026-10-17",
+  "holdout_repos": 181,
+  "dataset_repos": 337,
+  "tools": {
+    "secretscan":       {"precision": 91.5, "recall": 59.2, "f1": 0.719},
+    "secretscan_prev":  {"precision": 83.7, "recall": 48.0, "f1": 0.611},
+    "gitleaks":         {"precision": 91.8, "recall": 28.9, "f1": 0.440},
+    "gitleaks_triage":  {"precision": 93.6, "recall": 27.5, "f1": 0.425},
+    "trufflehog":       {"precision": 44.7, "recall": 3.4,  "f1": 0.064, "version": "3.97.9"}
+  },
+  "dev": {"precision": 98.8, "recall": 89.0},
+  "policy": {
+    "strict":           {"recall": 59.2, "precision": 91.5},
+    "balanced":         {"recall": 39.9, "precision": 90.2},
+    "balanced_review":  {"recall": 22.2, "precision": 87.4}
+  },
+  "triage": {
+    "gitleaks_true": 1110,
+    "gitleaks_false": 99,
+    "conservative": {"true": 1056, "false": 72},
+    "standard":     {"true": 1005, "false": 68},
+    "changetoken_lost": 41
+  }
+}

@@ -71,14 +71,16 @@ confidence, and one the provider rejects is low.
 | other low confidence (weak evidence) | blocks | listed under **Needs review**, does not block |
 | filtered as noise | counted, listable | counted, listable |
 
-The trade-off is measured on CredData (337 real repositories, labeled
-independently):
+<!-- bench:policy-table -->
+The trade-off is measured on CredData repositories never used for design
+([2026-10-17](../bench/results/2026-10-17.md)):
 
 | Setting | Blocking recall | Blocking precision |
 |---|---|---|
-| strict | 68.7% | 85.0% |
-| balanced (default: `testFixtures = "block"`) | 59.9% | 91.6% |
-| balanced, `testFixtures = "review"` | 17.5% | 88.1% |
+| strict | 59.2% | 91.5% |
+| balanced (default: `testFixtures = "block"`) | 39.9% | 90.2% |
+| balanced, `testFixtures = "review"` | 22.2% | 87.4% |
+<!-- /bench:policy-table -->
 
 Blocking test fixtures raises recall *and* precision on real repositories:
 credential-shaped values in test directories are usually real credentials or
@@ -163,14 +165,15 @@ Concurrency and paging tokens count as request-style: an AWS WAF
 `ChangeToken` only serializes updates and grants no access, so it is not
 reported even though CredData labels it as a token.
 
-It was designed on one half of CredData's repositories and measured once on
-the other half, which no change had seen (gitleaks: 1,110 true, 99 false):
+<!-- bench:triage-modes -->
+It was designed on one half of CredData's repositories and is measured on
+the other half, which no change has seen (gitleaks: 1,110 true, 99 false):
 
 | Triage mode | True kept | False kept | Real secrets lost |
 |---|---|---|---|
-| before this release | 980 | 72 | 130 |
-| standard | 987 | 73 | 123 |
-| conservative (default) | 1,095 | 79 | 15 |
+| standard | 1,005 | 68 | 105 |
+| conservative (default) | 1,056 | 72 | 54 (41 are `ChangeToken`) |
+<!-- /bench:triage-modes -->
 
 The cost is review volume: on published packages gitleaks + triage reports
 5.0 findings per 1,000 files instead of 2.1 (1.5 blocking under balanced).
@@ -220,13 +223,16 @@ Results are in [bench/results/](../bench/results/2026-10-15.md).
 
 ## Limitations
 
+<!-- bench:limits -->
 - The labeled secrets and the issue set are this project's own; they are
-  a regression suite. The independent measurements are CredData (first run)
-  and the first leaky-repo run. On CredData secretscan's precision is on par
-  with gitleaks (85.0% vs 86.1%), not better; its advantage is recall.
-- Triage still loses some real secrets: 15 of 1,110 on CredData's holdout
-  half in conservative mode (123 in standard mode), mostly base64-encoded JSON
-  tokens and values under keys it does not recognise as credential names.
+  a regression suite. The independent measurements are CredData's holdout
+  half and the first leaky-repo run. On the holdout secretscan's precision is
+  level with gitleaks (91.5% vs 91.8%); its advantage is recall
+  (59.2% vs 28.9%).
+- Triage still loses real secrets: 54 of 1,110 on CredData's holdout half in
+  conservative mode (105 in standard mode), 41 of them AWS WAF
+  `ChangeToken` values by design.
+<!-- /bench:limits -->
 - Nobody outside the project has run `bench/reproduce.sh` yet; the
   `benchmark` workflow lets anyone do it in a fork.
 - trufflehog was run only without verification and only on CredData and

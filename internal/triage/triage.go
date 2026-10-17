@@ -16,11 +16,14 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/AISolutionLabs/secret-scanner/internal/detect"
@@ -216,6 +219,9 @@ type Triager struct {
 	why   map[string]string
 	cur   string
 	Mode  string // Conservative (default) or Standard
+	// MaxSource caps how much of one source file triage reads (default
+	// 8 MiB); larger files stay uncorroborated without being loaded.
+	MaxSource int64
 }
 
 // New returns a triager.
@@ -289,23 +295,97 @@ func (t *Triager) source(in Input) (string, string) {
 		}
 		// "./" makes the path relative to --root rather than to the top of the
 		// repository, so --root on a subdirectory reads the right file.
-		out, err := exec.Command("git", "-C", t.Root, "show", "--no-textconv", in.Commit+":./"+rel).Output()
-		if err != nil {
+		out, err := t.blobAt(in.Commit + ":./" + rel)
+		switch {
+		case err == errTooLarge:
+			return set("", "source file too large to re-check")
+		case err != nil:
 			return set("", "source at commit "+in.Commit[:min(10, len(in.Commit))]+" unavailable (no working-tree substitution)")
 		}
-		if len(out) > maxSource {
-			return set("", "source file too large to re-check")
-		}
-		return set(string(out), "")
+		return set(out, "")
 	}
-	b, err := os.ReadFile(abs)
-	if err != nil {
+	b, err := readBounded(abs, t.limit())
+	switch {
+	case err == errTooLarge:
+		return set("", "source file too large to re-check")
+	case err != nil:
 		return set("", "source file unreadable")
 	}
-	if len(b) > maxSource {
-		return set("", "source file too large to re-check")
+	return set(b, "")
+}
+
+var errTooLarge = errors.New("source larger than the triage limit")
+
+func (t *Triager) limit() int64 {
+	if t.MaxSource > 0 {
+		return t.MaxSource
 	}
-	return set(string(b), "")
+	return maxSource
+}
+
+// readBounded reads a working-tree file without ever holding more than
+// limit+1 bytes: the size is checked before reading, and the read itself is
+// capped in case the file grows in between.
+func readBounded(path string, limit int64) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil {
+		return "", err
+	} else if !fi.Mode().IsRegular() {
+		return "", errors.New("not a regular file")
+	} else if fi.Size() > limit {
+		return "", errTooLarge
+	}
+	b, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return "", err
+	}
+	if int64(len(b)) > limit {
+		return "", errTooLarge
+	}
+	return string(b), nil
+}
+
+// blobAt reads one blob from history with the same bound: git reports the
+// size first, and the content is streamed through a capped reader, stopping
+// git if it ever exceeds the limit. Content is raw (no textconv filters).
+func (t *Triager) blobAt(spec string) (string, error) {
+	limit := t.limit()
+	size, err := exec.Command("git", "-C", t.Root, "cat-file", "-s", spec).Output()
+	if err != nil {
+		return "", err
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(string(size)), 10, 64)
+	if err != nil {
+		return "", err
+	}
+	if n > limit {
+		return "", errTooLarge
+	}
+	cmd := exec.Command("git", "-C", t.Root, "cat-file", "blob", spec)
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", err
+	}
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+	b, rerr := io.ReadAll(io.LimitReader(out, limit+1))
+	if int64(len(b)) > limit {
+		cmd.Process.Kill()
+		cmd.Wait()
+		return "", errTooLarge
+	}
+	if werr := cmd.Wait(); werr != nil {
+		return "", werr
+	}
+	if rerr != nil {
+		return "", rerr
+	}
+	return string(b), nil
 }
 
 // probe is the text expected at the reported location (full value or prefix).

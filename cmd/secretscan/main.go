@@ -971,9 +971,8 @@ policy: balanced (unless .secretscan.toml sets one). High- and medium-confidence
 findings block, and so do generic values in test/example files (set
 testFixtures = "review" in .secretscan.toml to list those for review instead).
 Weak evidence (low confidence) is printed under "Needs review" and does NOT
-block. On CredData (337 real repositories, labeled independently) balanced
-blocks 60% of labeled secrets at 92% precision; strict blocks 69% at 85%.
-Run CI with the default strict policy, or reinstall with
+block.
+` + balancedPolicyFigures + `Run CI with the default strict policy, or reinstall with
 --policy strict to block everything locally.
 `)
 	}

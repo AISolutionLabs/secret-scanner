@@ -31,6 +31,8 @@ jobs:
       - name: Measure filter false negatives (20,000 random secrets per alphabet)
         shell: bash
         run: go test -count=1 -run 'PerAlphabet|SpareRandomSecrets' -v ./internal/detect | grep -E '^\s*\||lost|ok|FAIL'
+      - name: Published benchmark figures match bench/results/latest.json
+        run: python3 bench/render_docs.py --check
       - name: Validate example config
         run: go run ./cmd/secretscan validate -c examples/secretscan.toml
       - name: Scan this repository's history with itself

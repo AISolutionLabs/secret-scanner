@@ -44,6 +44,22 @@ Designed on CredData's dev half, measured once on its test half: precision
 - Rules can declare content validators (`basic-auth`, `opaque-token`); a
   value that fails validation never becomes a finding.
 
+### Fixes from an external code review
+- `triage` enforces its 8 MiB source limit while reading: working-tree
+  files are size-checked before reading and read through a capped reader;
+  history blobs are size-checked with `git cat-file -s` and streamed with a
+  cap, so a huge file named in a report can no longer exhaust memory.
+- `--verify` checks each secret once per run even under concurrency
+  (in-flight requests are shared), and only a provider's documented success
+  shape verifies (`login` for GitHub, `object: balance` for Stripe,
+  `data.viewer.id` for Linear, ...): JSON error objects, empty documents and
+  malformed bodies are unverified. 403 is no longer treated as verified.
+  GitHub App installation tokens are checked against
+  `/installation/repositories`.
+- README, docs and the install-hook message take their benchmark figures
+  from `bench/results/latest.json` (`bench/render_docs.py`); CI fails if a
+  published figure is stale.
+
 ### Fixes from an adversarial recall and security review
 - One-word default passwords plus digits (`admin@123`, `Welcome@2024`,
   `P@ssw0rd2023`, `Password1`) under password keys are reported at low

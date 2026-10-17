@@ -134,18 +134,20 @@ secretscan: 2 secrets found (1 critical, 1 medium) · scanned 3 files (490 B) in
 - `--policy strict|balanced`, or `policy = "balanced"` in `.secretscan.toml`.
   Without either, `dir`/`git`/`stdin` scans use **strict** and installed git
   hooks use **balanced** (`install-hook --policy strict` to change it).
+<!-- bench:policy -->
 - Balanced blocks high and medium confidence, and generic values in
   test/example files. Only weak evidence (low confidence: dictionary-style
   passwords, values with few supporting signals) is printed under
-  "Needs review" without blocking. On
-  [CredData](bench/results/2026-10-16.md) (337 real repositories) balanced
-  blocks 60% of labeled secrets at 92% precision, strict 69% at 85%.
+  "Needs review" without blocking. On CredData repositories never used for
+  design ([2026-10-17](bench/results/2026-10-17.md)), balanced blocks 39.9% of
+  labeled secrets at 90.2% precision, strict 59.2% at 91.5%.
 - A real credential committed as a test fixture is still a credential, so
   fixtures block by default. A repository whose tests are full of fake
   credentials can set `testFixtures = "review"` in `.secretscan.toml` (or
   `--test-fixtures review`) to list them for review instead; balanced then
-  blocks only 17.5% of CredData's labeled secrets. Provider-format tokens
+  blocks 22.2% of those labeled secrets. Provider-format tokens
   (`ghp_`, `AKIA`, private keys, ...) block in test files under every setting.
+<!-- /bench:policy -->
 - Keep CI on strict so nothing merges without a decision.
 - Every finding has `Confidence` (high/medium/low), `Evidence` and `Blocking`
   in JSON. SARIF levels follow the policy (blocking = `error`).
@@ -188,9 +190,12 @@ credentials take those shapes. Structural filters (digests, truncated or
 published examples, placeholders, sequences) and values that name a secret
 (`prod-db-secret-id`) still apply, and UUIDs under request-style keys
 (`request_token`, `idempotency_key`) are still IDs. `--mode standard` applies
+<!-- bench:triage-modes -->
 every filter: fewer findings to review, more real secrets lost. On CredData
-repositories never used to design it, conservative lost 15 of gitleaks' 1,110
-true findings and standard lost 123.
+repositories never used to design it, conservative lost 54 of gitleaks'
+1,110 true findings (41 of them AWS WAF `ChangeToken` values, deliberately
+not treated as credentials) and standard lost 105.
+<!-- /bench:triage-modes -->
 
 ## Git hooks
 
@@ -430,6 +435,7 @@ Most independent evidence first.
 lines, scored per line with CredData's method, excluding categories that are
 identifiers rather than secrets. Repositories are split in half by hash;
 every improvement is designed on one half and measured once on the other.
+<!-- bench:holdout -->
 Latest holdout ([2026-10-17](bench/results/2026-10-17.md)), on 181
 repositories never used for design:
 
@@ -441,12 +447,14 @@ repositories never used for design:
 | gitleaks + `secretscan triage` | **93.6%** | 27.5% | 0.425 |
 | trufflehog 3.97.9 | 44.7% | 3.4% | 0.064 |
 
-On unseen repositories secretscan now matches gitleaks' precision while
-finding twice as many of the labeled secrets. Under balanced, the hook
-default, 39.9% of them block at 90.2% precision. On the half used for design
-it reaches 98.8% / 89.0%; the gap is the honest measure of how much of that
-transfers. Triage drops 54 of gitleaks' true findings, 41 of them AWS WAF
-`ChangeToken` values that are deliberately not treated as credentials.
+On unseen repositories secretscan matches gitleaks' precision while finding
+twice as many of the labeled secrets. Under balanced, the hook default,
+39.9% of them block at 90.2% precision. On the half used for design
+it reaches 98.8% / 89.0%; the gap is the honest measure of how much of
+that transfers. Triage drops 54 of gitleaks' true findings, 41 of them
+AWS WAF `ChangeToken` values that are deliberately not treated as
+credentials.
+<!-- /bench:holdout -->
 The very first CredData run, before any CredData-informed change, is in
 [2026-10-15](bench/results/2026-10-15.md).
 
