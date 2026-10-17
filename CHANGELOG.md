@@ -6,6 +6,12 @@ for what counts as a breaking change.
 
 ## Unreleased
 
+- Release verification is a reusable workflow (`verify-release.yml`):
+  `release.yml` calls it after publishing, and it can be run by hand for
+  any published tag. Its Windows smoke test failed on v1.1.0 although the
+  binary behaved correctly (pwsh ends a step with the last native exit
+  code, here the expected 1 from blocking a secret); fixed, and the same
+  test now runs in CI on every push.
 - The CI templates (`ci/github-actions.yml`, `ci/azure-pipelines.yml`)
   publish SARIF, so they now pass `SECRETSCAN_HASH_KEY` from the CI secret
   store: published fingerprints are keyed once the secret is defined (plain
