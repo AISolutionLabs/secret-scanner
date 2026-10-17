@@ -23,6 +23,11 @@ detection-code fingerprint as the published benchmark).
   (`word-tokens`) and any value under `*_algorithm`/`*_scheme` keys
   (`algorithm-name`). `algorithm-name` had no keep case before.
 - README: report retention guidance for CI.
+- Release verification on macOS hung after a successful, signature-checked
+  install of v1.1.0: its test token came from `tr </dev/urandom | head`,
+  which never ends on macOS runners (SIGPIPE ignored). Tokens now come from
+  python3; verify jobs time out after 20 minutes; CI runs the same smoke
+  test on Linux, macOS and Windows on every push.
 
 ## 1.2.0 - 2026-10-17
 

@@ -16,6 +16,8 @@ permissions:
   contents: read
 env:
   TAG: ${{ inputs.tag }}
+# Tokens are generated with python3, never `tr </dev/urandom | head`: macOS
+# runners start jobs with SIGPIPE ignored and BSD tr then never stops.
 jobs:
   # Install the published release the way the README says, on clean runners,
   # and check that it actually blocks a secret.
@@ -24,6 +26,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: sigstore/cosign-installer@v3
@@ -36,7 +39,7 @@ jobs:
           d="$RUNNER_TEMP/smoke" && mkdir -p "$d" && cd "$d" && git init -q
           echo 'print("hello")' > ok.py
           "$RUNNER_TEMP/bin/secretscan" dir . -q
-          tok="ghp_$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 36)"
+          tok="ghp_$(python3 -c 'import secrets,string; print("".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(36)))')"
           echo "TOKEN = \"$tok\"" > leak.py
           if "$RUNNER_TEMP/bin/secretscan" dir . -q; then echo "secret not blocked"; exit 1; fi
       - name: Build provenance verifies
@@ -59,13 +62,14 @@ jobs:
           git config user.email ci@example.com && git config user.name ci
           printf 'repos:\n  - repo: https://github.com/%s\n    rev: %s\n    hooks:\n      - id: secretscan\n' "$GITHUB_REPOSITORY" "$TAG" > .pre-commit-config.yaml
           git add .pre-commit-config.yaml && git commit -qm init
-          tok="ghp_$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 36)"
+          tok="ghp_$(python3 -c 'import secrets,string; print("".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(36)))')"
           echo "TOKEN = \"$tok\"" > leak.py && git add leak.py
           if pre-commit run secretscan; then echo "hook did not block"; exit 1; fi
 
   # The same checks on Windows, through install.ps1.
   verify-install-windows:
     runs-on: windows-latest
+    timeout-minutes: 20
     defaults:
       run:
         shell: pwsh

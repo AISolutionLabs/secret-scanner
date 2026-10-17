@@ -80,6 +80,17 @@ jobs:
           pwsh -NoProfile -File ./install.ps1 -InstallDir "$env:RUNNER_TEMP\bin"
           if ($LASTEXITCODE -eq 0 -or (Test-Path "$env:RUNNER_TEMP\bin\secretscan.exe")) { throw "tampered binary installed" }
           $global:LASTEXITCODE = 0 # the failed install above was expected
+      - name: Unix smoke test (same check as verify-release)
+        if: runner.os != 'Windows'
+        timeout-minutes: 5
+        run: |
+          go build -o "$RUNNER_TEMP/ss" ./cmd/secretscan
+          d="$RUNNER_TEMP/smoke" && mkdir -p "$d" && cd "$d" && git init -q
+          echo 'print("hello")' > ok.py
+          "$RUNNER_TEMP/ss" dir . -q
+          tok="ghp_$(python3 -c 'import secrets,string; print("".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(36)))')"
+          echo "TOKEN = \"$tok\"" > leak.py
+          if "$RUNNER_TEMP/ss" dir . -q; then echo "secret not blocked"; exit 1; fi
       - name: Windows smoke test (same check as verify-release)
         if: runner.os == 'Windows'
         shell: pwsh
