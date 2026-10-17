@@ -34,9 +34,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           v="${GITHUB_REF_NAME#v}"
-          # Release notes are the CHANGELOG section for this version.
+          # Release notes: docs/release-notes/<tag>.md when present (figures
+          # generated from bench/results/latest.json, checked in CI), else the
+          # CHANGELOG section for this version. The CHANGELOG section must
+          # exist either way.
           awk -v v="$v" '$0 ~ "^## "v"( |$)" {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
           test -s notes.md || { echo "CHANGELOG.md has no section for $v"; exit 1; }
+          if [ -f "docs/release-notes/$GITHUB_REF_NAME.md" ]; then
+            grep -v '^<!-- /\{0,1\}bench:' "docs/release-notes/$GITHUB_REF_NAME.md" > notes.md
+          fi
           gh release create "$GITHUB_REF_NAME" dist/* --title "secretscan $GITHUB_REF_NAME" --notes-file notes.md --verify-tag
 
   # Install the published release the way the README says, on clean runners,

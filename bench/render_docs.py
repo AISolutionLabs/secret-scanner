@@ -70,6 +70,33 @@ that transfers. Triage drops {lost_c} of gitleaks' true findings, {tr['changetok
 AWS WAF `ChangeToken` values that are deliberately not treated as
 credentials.""",
         },
+        "docs/release-notes/v1.0.0.md": {
+            "release": f"""Samsung CredData, {d['holdout_repos']} repositories never used for design
+(secrets-only labels, default settings):
+
+| Tool | Precision | Recall | F1 |
+|---|---|---|---|
+| **secretscan 1.0.0** | {pct(t['secretscan']['precision'])} | **{pct(t['secretscan']['recall'])}** | **{t['secretscan']['f1']:.3f}** |
+| gitleaks | {pct(t['gitleaks']['precision'])} | {pct(t['gitleaks']['recall'])} | {t['gitleaks']['f1']:.3f} |
+| gitleaks + `secretscan triage` | **{pct(t['gitleaks_triage']['precision'])}** | {pct(t['gitleaks_triage']['recall'])} | {t['gitleaks_triage']['f1']:.3f} |
+| trufflehog {t['trufflehog']['version']} (`--no-verification`) | {pct(t['trufflehog']['precision'])} | {pct(t['trufflehog']['recall'])} | {t['trufflehog']['f1']:.3f} |
+
+secretscan matches gitleaks' precision on these repositories and finds
+{times} as many of the labelled secrets. With the hook default (balanced),
+{pct(p['balanced']['recall'])} of the labelled secrets block, at {pct(p['balanced']['precision'])} precision; strict blocks
+{pct(p['strict']['recall'])}. On the half of CredData used for design, secretscan reaches
+{pct(d['dev']['precision'])} precision and {pct(d['dev']['recall'])} recall. The gap between the two halves
+shows how much of the tuning carries over to repositories it has not seen.
+trufflehog was run without verification, so its recall reflects detector
+coverage, not its usual verified-only workflow.""",
+            "release-limits": f"""- {100 - t['secretscan']['recall']:.0f}% of CredData's labelled secrets on unseen repositories are not
+  found ({pct(t['secretscan']['recall'])} recall). Balanced trades recall for fewer interruptions
+  ({pct(p['balanced']['recall'])} of labelled secrets block); use strict where that matters more.
+- In its default conservative mode, triage drops {lost_c} of gitleaks'
+  {num(tr['gitleaks_true'])} true findings on unseen repositories. {tr['changetoken_lost']} of those are AWS WAF
+  `ChangeToken` values, which are deliberately not treated as
+  credentials.""",
+        },
         "docs/precision.md": {
             "policy-table": f"""The trade-off is measured on CredData repositories never used for design
 ([{d['date']}](../{rf})):
