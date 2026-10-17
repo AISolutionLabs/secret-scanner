@@ -168,6 +168,12 @@ func BuildPatch(root string, items []PatchItem) PatchResult {
 			}
 			continue
 		}
+		// Never follow a symlink: the rewrite would land on its target, which
+		// may be outside the scanned tree.
+		if fi, err := os.Lstat(filepath.Join(root, file)); err == nil && !fi.Mode().IsRegular() {
+			res.Skipped = append(res.Skipped, fmt.Sprintf("%s: not a regular file (symlink or special file); not rewritten", file))
+			continue
+		}
 		data, err := os.ReadFile(filepath.Join(root, file))
 		if err != nil {
 			res.Skipped = append(res.Skipped, fmt.Sprintf("%s: %v", file, err))

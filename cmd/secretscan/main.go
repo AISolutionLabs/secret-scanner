@@ -554,8 +554,10 @@ func runScan(ctx context.Context, mode string, args []string) int {
 			return exitError
 		}
 		werr := report.Write(out, format, kept, rs.Rules, version, report.Options{Remediation: c.remediation, Policy: policy, Explain: c.staged || c.prePush})
-		if cerr := out.Close(); werr == nil {
-			werr = cerr
+		if werr != nil {
+			out.Abort() // never leave a truncated report where a complete one is expected
+		} else {
+			werr = out.Close()
 		}
 		if werr != nil {
 			fmt.Fprintf(os.Stderr, "secretscan: %v\n", werr)
@@ -952,7 +954,8 @@ func runInstallHook(args []string) int {
 			}
 			fmt.Printf("existing %s hook kept as %s.local and chained after the scan\n", k, k)
 		}
-		if err := os.WriteFile(path, []byte(hookScript(k, bin, *hookPolicy)), 0o755); err != nil {
+		// A symlinked hook is replaced by a regular file; its target is never written.
+		if err := writeAtomic(path, []byte(hookScript(k, bin, *hookPolicy)), 0o755, true); err != nil {
 			fmt.Fprintf(os.Stderr, "secretscan: %v\n", err)
 			return exitError
 		}
@@ -1023,11 +1026,14 @@ func applyFixes(patchPath string, inPlace, yes bool, root string, fs []detect.Fi
 	if inPlace {
 		for file, content := range res.Files {
 			p := filepath.Join(root, file)
-			info, err := os.Stat(p)
+			info, err := os.Lstat(p)
 			if err != nil {
 				return "", err
 			}
-			if err := os.WriteFile(p, []byte(content), info.Mode().Perm()); err != nil {
+			if !info.Mode().IsRegular() {
+				return "", fmt.Errorf("%s is not a regular file; not rewritten", p)
+			}
+			if err := writeAtomic(p, []byte(content), info.Mode().Perm(), false); err != nil {
 				return "", err
 			}
 		}
@@ -1133,35 +1139,30 @@ func runExplain(args []string) int {
 
 // runTriage re-scores another scanner's findings with secretscan's context
 // analysis. Filtered findings are listed with their reason, never dropped.
-// createPrivate opens a file for secrets-bearing output with mode 0600. An
-// existing file keeps its mode under O_CREATE, so it is tightened explicitly
-// before anything is written.
-func createPrivate(path string) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+// readReport reads at most limit bytes of a triage report. A larger report
+// is an error, never a partial or clean result: the report is parsed in
+// memory, so its size bounds what triage allocates.
+func readReport(r io.Reader, name string, limit int64) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(r, limit+1))
 	if err != nil {
 		return nil, err
 	}
-	if err := f.Chmod(0o600); err != nil && runtime.GOOS != "windows" {
-		f.Close()
-		return nil, fmt.Errorf("cannot restrict permissions of %s: %w", path, err)
+	if int64(len(b)) > limit {
+		return nil, fmt.Errorf("%s: report is larger than %d MiB; raise --max-report-megabytes if it is genuine", name, limit>>20)
 	}
-	if err := f.Truncate(0); err != nil {
-		f.Close()
-		return nil, err
-	}
-	return f, nil
+	return b, nil
 }
 
-func writePrivate(path string, b []byte) error {
-	f, err := createPrivate(path)
+func readReportFile(path string, limit int64) ([]byte, error) {
+	f, err := os.Open(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if _, err := f.Write(b); err != nil {
-		f.Close()
-		return err
+	defer f.Close()
+	if fi, err := f.Stat(); err == nil && fi.Mode().IsRegular() && fi.Size() > limit {
+		return nil, fmt.Errorf("%s: report is %d MiB, larger than %d MiB; raise --max-report-megabytes if it is genuine", path, fi.Size()>>20, limit>>20)
 	}
-	return f.Close()
+	return readReport(f, path, limit)
 }
 
 func runTriage(args []string) int {
@@ -1170,6 +1171,7 @@ func runTriage(args []string) int {
 	bindCommon(fs, &c, "triage")
 	root := fs.String("root", ".", "directory (or git repository) the report's paths are relative to; files outside it are never read")
 	deleteInput := fs.Bool("delete-input", false, "delete the report file after reading it (even if triage fails)")
+	maxReport := fs.Int64("max-report-megabytes", 256, "refuse a report larger than this (the whole report is parsed in memory)")
 	mode := fs.String("mode", triage.Conservative, "conservative (never filter a value under a credential-named key for its shape alone) | standard (apply every filter)")
 	pos, err := parseInterleaved(fs, args)
 	if err != nil {
@@ -1182,9 +1184,14 @@ func runTriage(args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: secretscan triage <gitleaks.json | trufflehog.jsonl | report.sarif | -> [--root DIR] [--policy balanced]")
 		return exitError
 	}
+	if *maxReport < 1 {
+		fmt.Fprintln(os.Stderr, "secretscan: --max-report-megabytes must be at least 1")
+		return exitError
+	}
+	limit := *maxReport << 20
 	var data []byte
 	if pos[0] == "-" {
-		data, err = io.ReadAll(os.Stdin)
+		data, err = readReport(os.Stdin, "standard input", limit)
 	} else {
 		if *deleteInput {
 			defer func() {
@@ -1196,7 +1203,7 @@ func runTriage(args []string) int {
 		if fi, serr := os.Stat(pos[0]); serr == nil && fi.Mode().Perm()&0o077 != 0 {
 			fmt.Fprintf(os.Stderr, "secretscan: warning: %s is readable by other users (mode %v)\n", pos[0], fi.Mode().Perm())
 		}
-		data, err = os.ReadFile(pos[0])
+		data, err = readReportFile(pos[0], limit)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "secretscan: %v\n", err)
@@ -1271,7 +1278,11 @@ func runTriage(args []string) int {
 			fmt.Fprintf(os.Stderr, "secretscan: %v\n", err)
 			return exitError
 		}
-		defer fh.Close()
+		defer func() {
+			if cerr := fh.Close(); cerr != nil {
+				fmt.Fprintf(os.Stderr, "secretscan: writing %s: %v\n", c.reportPath, cerr)
+			}
+		}()
 		out, color = fh, false
 		if format == "" {
 			format = strings.TrimPrefix(strings.ToLower(filepath.Ext(c.reportPath)), ".")

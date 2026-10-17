@@ -361,7 +361,8 @@ disables the heuristic filters below. Both are useful for audits.
     --ignore-file FILE       fingerprints/hashes to ignore
 -b, --baseline-path FILE     JSON report of accepted findings
 -f, --report-format FMT      text | json | sarif | csv | junit | stats (anonymized counts)
--r, --report-path FILE       write report to file (format inferred from extension)
+-r, --report-path FILE       write report to file (format inferred from extension;
+                             never written through a symlink, replaced atomically)
     --redact[=N]             mask N% of each secret (default 80; --redact=0 shows all)
     --exit-code N            exit code on findings (default 1)
     --min-severity LEVEL     info | low | medium | high | critical

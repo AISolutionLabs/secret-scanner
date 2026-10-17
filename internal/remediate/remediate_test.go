@@ -303,3 +303,24 @@ func TestPatchSkipsConstantContexts(t *testing.T) {
 		t.Errorf("skip reasons: %v", res.Skipped)
 	}
 }
+
+// A symlinked source file is never rewritten: its target may be outside the
+// scanned tree.
+func TestBuildPatchSkipsSymlinks(t *testing.T) {
+	dir, outside := t.TempDir(), t.TempDir()
+	secret := "SECRET1"
+	target := filepath.Join(outside, "settings.py")
+	if err := os.WriteFile(target, []byte("KEY = \""+secret+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "settings.py")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	res := BuildPatch(dir, []PatchItem{{File: "settings.py", Line: 1, Secret: secret, EnvVar: "KEY"}})
+	if len(res.Files) != 0 || len(res.Patched) != 0 {
+		t.Fatalf("symlinked file was patched: %+v", res)
+	}
+	if len(res.Skipped) != 1 || !strings.Contains(res.Skipped[0], "not a regular file") {
+		t.Errorf("skip reason missing: %v", res.Skipped)
+	}
+}

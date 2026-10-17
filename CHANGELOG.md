@@ -45,6 +45,14 @@ Designed on CredData's dev half, measured once on its test half: precision
   value that fails validation never becomes a finding.
 
 ### Fixes from an external code review
+- Output files are never written through a link: reports, fix patches,
+  hooks and `--fix` rewrites go to a new file in the destination directory
+  that is renamed into place. A symlink at a report or patch path is refused
+  (terminal and pipe links such as `/dev/stdout` still work), a symlinked
+  hook is replaced by a regular file, `--fix` skips symlinked sources, and a
+  failed report write leaves no partial file.
+- `triage --max-report-megabytes N` (default 256): a larger report, from a
+  file or stdin, is rejected before parsing with exit 2.
 - `triage` enforces its 8 MiB source limit while reading: working-tree
   files are size-checked before reading and read through a capped reader;
   history blobs are size-checked with `git cat-file -s` and streamed with a
