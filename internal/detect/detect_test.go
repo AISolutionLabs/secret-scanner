@@ -37,6 +37,19 @@ func g(cs string, n int) string {
 	return string(b)
 }
 
+// rng2 feeds samples and tests added after the statistical tests were
+// calibrated, so adding a rule does not reshuffle the values those tests
+// draw from rng (their thresholds are per-sample, not per-seed).
+var rng2 = rand.New(rand.NewSource(4242))
+
+func g2(cs string, n int) string {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = cs[rng2.Intn(len(cs))]
+	}
+	return string(b)
+}
+
 func uuid() string {
 	return g(hexs, 8) + "-" + g(hexs, 4) + "-" + g(hexs, 4) + "-" + g(hexs, 4) + "-" + g(hexs, 12)
 }
@@ -169,6 +182,8 @@ func samples() map[string]sample {
 		"age-secret-key":                   s("AGE-SECRET-KEY-1" + g(bech32, 58)),
 		"kubeconfig-client-key":            s("    client-key-data: " + g(alnum, 80)),
 		"jwt":                              s("Authorization: Bearer eyJ" + g(alnum, 20) + ".eyJ" + g(alnum, 30) + "." + g(alnum, 30)),
+		"http-basic-auth":                  s(`req.Header.Set("Authorization", "Basic ` + base64.StdEncoding.EncodeToString([]byte("svc_"+g2(lowAln, 6)+":"+g2(alnum, 14))) + `")`),
+		"http-bearer-token":                s(`curl -H "Authorization: Bearer ` + g2(alnum, 40) + `" https://api.internal/v1`),
 		"url-credentials":                  s("DATABASE_URL=postgres://admin:" + g(alnum, 16) + "@db.internal:5432/app"),
 		"jdbc-password":                    s("jdbc:sqlserver://h:1433;databaseName=x;user=sa;password=" + g(alnum, 14)),
 		"connection-string-password":       s("Server=tcp:h,1433;User ID=sa;Password=" + g(alnum, 14) + ";Encrypt=True;"),

@@ -274,6 +274,17 @@ func DefaultRules() []Rule {
 			`(AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58})`, []string{"age-secret-key-1"}, "key"),
 		r("kubeconfig-client-key", "Client private key embedded in kubeconfig", "critical",
 			`client-key-data:\s*["']?([A-Za-z0-9+/=]{40,})`, []string{"client-key-data"}, "kubernetes", "key"),
+		// HTTP authorization schemes (Authorization / Proxy-Authorization
+		// headers, header maps, recorded requests). Basic must decode to
+		// printable user:password; Bearer must be token-shaped (see
+		// detect/validate.go). Both yield to provider rules on the same span.
+		{ID: "http-basic-auth", Description: "HTTP Basic credentials (base64 user:password)", Severity: "high",
+			Regex:    `(?i)\bbasic[ \t]+([A-Za-z0-9+/]{4,1000}={0,2})(?:[^A-Za-z0-9+/=_.$%{}<>-]|$)`,
+			Keywords: []string{"basic"}, Tags: []string{"credentials", "http-auth"}, Validate: "basic-auth"},
+		{ID: "http-bearer-token", Description: "HTTP Bearer token in an authorization header", Severity: "medium",
+			Regex:    `(?i)\bbearer[ \t]+([A-Za-z0-9_.~+/-]{16,1000}={0,2})(?:[^A-Za-z0-9_.~+/=$%{}<>-]|$)`,
+			Keywords: []string{"bearer"}, Tags: []string{"token", "http-auth"}, Validate: "bearer-token",
+			Allowlists: []Allowlist{placeholderValues}},
 		r("jwt", "JSON Web Token", "medium", tok(`eyJ[A-Za-z0-9_-]{15,}\.eyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{10,}={0,2}`), []string{"eyj"}, "token"),
 
 		// --- Credentials in URLs / connection strings ---------------------

@@ -80,7 +80,9 @@ func contextual(r *config.CompiledRule) bool {
 }
 
 // assess scores a candidate from independent signals.
-func assess(r *config.CompiledRule, secret string, quoted bool, path string, ent float64) (string, []string) {
+// Each extra entry is an independent signal from the rule's validator (e.g.
+// "decodes to user:password") and adds one point.
+func assess(r *config.CompiledRule, secret string, quoted bool, path string, ent float64, extra ...string) (string, []string) {
 	if r.Re == nil { // file-name rule
 		return Medium, []string{"file name matches a credential-file pattern"}
 	}
@@ -105,6 +107,10 @@ func assess(r *config.CompiledRule, secret string, quoted bool, path string, ent
 	if charClasses(secret) >= 3 || n >= 32 {
 		score++
 		ev = append(ev, "mixed character classes or long value")
+	}
+	for _, e := range extra {
+		score++
+		ev = append(ev, e)
 	}
 	if quoted || envishPath.MatchString(path) {
 		score++

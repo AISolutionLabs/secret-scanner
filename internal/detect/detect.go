@@ -91,6 +91,11 @@ var DefaultIgnoreMarkers = []string{
 
 const nextLineMarker = "secretscan:allow-next-line"
 
+// YieldsTag marks non-generic rules that still give way to provider rules
+// on the same span: an HTTP Bearer value that is also a JWT or a GitHub
+// token is reported once, by the provider rule.
+const YieldsTag = "http-auth"
+
 // Detector applies a ruleset.
 type Detector struct {
 	rs       *config.Ruleset
@@ -291,6 +296,14 @@ func (d *Detector) hits(text, lower, path string) ([]hit, []drop) {
 				if rule.Entropy > 0 && ent < entropyFloor(rule, secret) {
 					continue // never qualified: not a suppression
 				}
+				var extra []string
+				if rule.Validate != "" {
+					ok, why := validators[rule.Validate](secret)
+					if !ok {
+						continue // never qualified: not a suppression
+					}
+					extra = append(extra, why)
+				}
 				if filters && rule.Generic && rule.Entropy > 0 {
 					if looksLikeIdentifier(secret, quoted || envishPath.MatchString(path)) {
 						dropIt("identifier")
@@ -317,7 +330,7 @@ func (d *Detector) hits(text, lower, path string) ([]hit, []drop) {
 					dropIt("placeholder-password")
 					continue
 				}
-				conf, ev := assess(rule, secret, quoted, path, ent)
+				conf, ev := assess(rule, secret, quoted, path, ent, extra...)
 				hs = append(hs, hit{rule: rule, mStart: w[0] + m[0], mEnd: w[0] + m[1], sStart: w[0] + s, sEnd: w[0] + e,
 					match: strings.TrimSpace(sub[m[0]:m[1]]), secret: secret, entropy: ent, confidence: conf, evidence: ev})
 			}
@@ -1097,7 +1110,7 @@ func (d *Detector) newFinding(rule *config.CompiledRule, f Fragment, h hit, s, e
 		RuleID: rule.ID, Description: rule.Description, Severity: rule.Severity, Tags: rule.Tags,
 		File: f.FilePath, Match: h.match, Secret: h.secret, Entropy: round2(h.entropy), Decoded: decoded,
 		Commit: f.Commit, Author: f.Author, Email: f.Email, Date: f.Date, Message: f.Message,
-		sStart: s, sEnd: e, generic: rule.Generic,
+		sStart: s, sEnd: e, generic: rule.Generic || rule.HasTag(YieldsTag),
 		Confidence: h.confidence, Evidence: h.evidence,
 	}
 	if fd.Confidence == "" {

@@ -65,6 +65,11 @@ type Rule struct {
 	Severity    string      `json:"severity"` // critical|high|medium|low|info (default high)
 	Allowlist   *Allowlist  `json:"allowlist"`
 	Allowlists  []Allowlist `json:"allowlists"`
+	// Validate names a built-in content check (see Validators) a candidate
+	// must pass to qualify, e.g. "basic-auth": the value must decode to
+	// user:password. A candidate that fails it never qualified; it is not a
+	// suppression.
+	Validate string `json:"validate"`
 	// Self-tests, checked by `secretscan config validate`.
 	Examples  []string `json:"examples"`  // must produce a finding
 	Negatives []string `json:"negatives"` // must not produce a finding
@@ -507,6 +512,9 @@ func compileRule(r Rule) (*CompiledRule, error) {
 	if r.Entropy < 0 || r.Entropy > 8 {
 		return nil, fmt.Errorf("rule %q: entropy must be between 0 and 8", r.ID)
 	}
+	if r.Validate != "" && !Validators[r.Validate] {
+		return nil, fmt.Errorf("rule %q: unknown validator %q", r.ID, r.Validate)
+	}
 	cr := &CompiledRule{Rule: r}
 	var err error
 	if r.Regex != "" {
@@ -722,6 +730,10 @@ func (a *CompiledAllowlist) prefixCommit(commit string) bool {
 	}
 	return false
 }
+
+// Validators are the content checks a rule can name in Validate. The
+// detector implements each one (detect.validators).
+var Validators = map[string]bool{"basic-auth": true, "bearer-token": true}
 
 // HasTag reports whether the rule carries tag t.
 func (r *CompiledRule) HasTag(t string) bool {
