@@ -435,8 +435,11 @@ lost 130 before) while removing 20% of its false positives. On that unseen
 half gitleaks' precision is 91.8% and secretscan's 83.7%, with recall 28.9%
 and 48.0%.
 
-Under balanced, the hook default, 59.9% of CredData's labeled secrets block
-at 91.6% precision (strict: 68.7% at 85.0%).
+Across all repositories gitleaks + conservative triage now scores 92.8%
+precision at 54.5% recall (gitleaks alone 86.1% / 54.7%). Under balanced, the
+hook default, 59.9% of CredData's labeled secrets block at 91.6% precision
+(strict: 68.7% at 85.0%). All of this was regenerated end to end with
+`bench/reproduce.sh`.
 
 **2. Independent ground truth ([leaky-repo](https://github.com/Plazmaz/leaky-repo), 96 labeled risk lines).**
 
@@ -459,9 +462,9 @@ latency. These numbers catch regressions; they are not proof.
 
 | Tool | Recall | Safety set | Issue FPs | Findings / 1k package files | Commit latency p50 |
 |---|---|---|---|---|---|
-| secretscan | 529/529 (all block under balanced) | 40/40 | 0/91 | 2.98 (1.85 blocking under balanced) | 28 ms |
-| gitleaks | 435/529 | 28/40 | 16/91 | 6.98 | 60 ms |
-| gitleaks + `secretscan triage` | 435/529 | 28/40 | 0/91 | 2.05 (0.97 blocking under balanced) | – |
+| secretscan | 529/529 (all block under balanced) | 40/40 | 0/91 | 2.98 (2.69 blocking under balanced) | 44 ms |
+| gitleaks | 435/529 | 28/40 | 16/91 | 6.98 | 85 ms |
+| gitleaks + `secretscan triage` | 435/529 | 28/40 | 0/91 | 5.04 (1.49 blocking under balanced) | – |
 | detect-secrets | 388/529 | 28/40 | 23/91 | – | – |
 
 **5. Cost of the noise filters, per alphabet.** 20,000 random secrets per

@@ -81,7 +81,7 @@ log "noise-filter false negatives per alphabet"
   echo "# secretscan benchmark reproduction"
   echo
   echo "Run $(date -u +%Y-%m-%dT%H:%MZ) on $(uname -sm), $(nproc 2>/dev/null || sysctl -n hw.ncpu) CPUs."
-  echo "secretscan $(git -C "$ROOT" rev-parse --short HEAD), $("$GITLEAKS" version 2>/dev/null || echo "gitleaks ${GITLEAKS_REF:0:7}"),"
+  echo "secretscan $(git -C "$ROOT" rev-parse --short HEAD), gitleaks ${GITLEAKS_REF:0:7},"
   echo "detect-secrets $DETECT_SECRETS_VERSION, CredData ${CREDDATA_REF:0:7}, leaky-repo ${LEAKY_REF:0:7}."
   for f in creddata.all creddata.dev creddata.test leaky-repo regression adjudication filters; do
     echo; echo "## $f"; echo; cat "$OUT/$f.md"

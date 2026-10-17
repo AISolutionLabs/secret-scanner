@@ -167,10 +167,9 @@ the other half, which no change had seen (gitleaks: 1,110 true, 99 false):
 | standard | 987 | 73 | 123 |
 | conservative (default) | 1,095 | 79 | 15 |
 
-The cost is review volume: on published packages gitleaks + triage lists
-5.0 findings per 1,000 files for review instead of 2.1; blocking findings
-under balanced are unchanged (0.97). All 91 issue-derived false positives
-stay filtered.
+The cost is review volume: on published packages gitleaks + triage reports
+5.0 findings per 1,000 files instead of 2.1 (1.5 blocking under balanced).
+All 91 issue-derived false positives stay filtered.
 
 ## How it is measured
 
