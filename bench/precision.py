@@ -10,6 +10,8 @@ gen_precision_sets.py:
   issues/    issues/manifest.json  false positives from public issue trackers
   corpus/ holdneg/                 popular npm/PyPI packages (no live secrets expected)
   tools/gitleaks                   optional (else gitleaks on PATH)
+  tools/trufflehog                 optional (else $TRUFFLEHOG or PATH); not in the
+                                   default --tools; run with --no-verification
 
 Metrics
   recall          labeled secrets found (any report) / labeled secrets
@@ -27,6 +29,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 B = os.environ.get("BENCH_DIR", os.path.join(HERE, "work"))
 SS = os.environ.get("SECRETSCAN", os.path.join(HERE, "..", "bin", "secretscan"))
 GL = os.path.join(B, "tools", "gitleaks") if os.path.exists(os.path.join(B, "tools", "gitleaks")) else shutil.which("gitleaks")
+TH = (os.path.join(B, "tools", "trufflehog") if os.path.exists(os.path.join(B, "tools", "trufflehog"))
+      else os.environ.get("TRUFFLEHOG") or shutil.which("trufflehog"))
 CACHE = os.path.join(B, "cache")
 os.makedirs(CACHE, exist_ok=True)
 
@@ -91,11 +95,31 @@ def detect_secrets(root, key):
             for f, items in json.loads(p.stdout)["results"].items() for it in items]
 
 
+def trufflehog(root, key):
+    # --no-verification: by default trufflehog sends every match to the provider's
+    # API. Also cut off the network where unshare allows it.
+    u = shutil.which("unshare")
+    pre = [u, "-rn"] if u and subprocess.run([u, "-rn", "true"], capture_output=True).returncode == 0 else []
+    p = subprocess.run(pre + [TH, "filesystem", ".", "--json", "--no-verification", "--no-update", "--no-color"],
+                       cwd=root, capture_output=True, text=True)
+    res = []
+    for line in p.stdout.splitlines():
+        if not line.startswith("{"):
+            continue
+        r = json.loads(line)
+        fs = (r.get("SourceMetadata") or {}).get("Data", {}).get("Filesystem")
+        if fs and r.get("DetectorName"):
+            n = fs.get("line") or 1
+            res.append((norm(root, fs["file"]), (n, n), r["DetectorName"], True, True))
+    return res
+
+
 TOOLS = {
     "secretscan": lambda root, key: secretscan(root),
     "gitleaks": gitleaks,
     "gitleaks+triage": gitleaks_triaged,
     "detect-secrets": detect_secrets,
+    "trufflehog": trufflehog,
 }
 
 
@@ -130,7 +154,7 @@ def run_quality(tools, skip_corpora):
         if name.startswith("gitleaks") and not GL:
             print(f"skip {name}: gitleaks not found", file=sys.stderr)
             continue
-        if name == "detect-secrets" and not shutil.which("detect-secrets"):
+        if name == "detect-secrets" and not shutil.which("detect-secrets") or name == "trufflehog" and not TH:
             continue
         for set_name, (d, tf) in LABELED.items():
             root = os.path.join(B, d)

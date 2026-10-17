@@ -5,9 +5,12 @@ credential lines (secrets obfuscated, formats preserved). secretscan was not
 developed or tuned on it.
 
   python3 bench/creddata.py /path/to/CredData [--tools secretscan,gitleaks,gitleaks+triage,detect-secrets]
+  TRUFFLEHOG=/path/to/trufflehog python3 bench/creddata.py /path/to/CredData --tools trufflehog,trufflehog+triage
 
-detect-secrets is run with --no-verify: by default it sends matches to provider
-APIs. Expect it to take about an hour on CredData; the others take minutes.
+detect-secrets is run with --no-verify and trufflehog with --no-verification
+(and without network access where unshare allows it): by default both send
+matches to provider APIs. Expect detect-secrets to take about an hour on
+CredData; the others take minutes. Tools that are not installed are skipped.
 
 Scoring is per line, as in CredData's own benchmark: a reported line inside
 a row labeled T is a true positive; a reported line whose rows are all F/X is
@@ -34,6 +37,7 @@ import argparse, collections, csv, glob, hashlib, json, os, shutil, subprocess, 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SS = os.environ.get("SECRETSCAN", os.path.join(HERE, "..", "bin", "secretscan"))
 GL = os.environ.get("GITLEAKS", shutil.which("gitleaks") or "")
+TH = os.environ.get("TRUFFLEHOG", shutil.which("trufflehog") or "")
 IDENTIFIER_CATEGORIES = {"UUID", "AWS S3 Bucket", "Firebase Domain", "Tencent WeChat API App ID", "Nonce", "Salt"}
 
 
@@ -126,6 +130,7 @@ def gitleaks(root):
 
 TRIAGE_ARGS = []
 GITLEAKS_REPORT = None  # reuse an existing gitleaks JSON report instead of rescanning
+TRUFFLEHOG_REPORT = None  # same for trufflehog JSON lines
 
 
 def gitleaks_triage(root):
@@ -148,6 +153,61 @@ def gitleaks_triage(root):
         os.remove(out)
 
 
+def no_network():
+    """Prefix that runs a command without network access (a fresh network
+    namespace), if this system allows it; [] otherwise."""
+    u = shutil.which("unshare")
+    if u and subprocess.run([u, "-rn", "true"], capture_output=True).returncode == 0:
+        return [u, "-rn"]
+    return []
+
+
+TRUFFLEHOG_OUT = {}  # root -> JSON lines, so trufflehog+triage reuses one scan
+
+
+def trufflehog_raw(root):
+    """trufflehog JSON lines for data/. --no-verification is essential: by
+    default trufflehog sends every match to the provider's API to check it.
+    The scan also runs without network access where possible."""
+    if TRUFFLEHOG_REPORT:
+        return open(TRUFFLEHOG_REPORT).read()
+    if root not in TRUFFLEHOG_OUT:
+        p = subprocess.run(no_network() + [TH, "filesystem", "data", "--json", "--no-verification", "--no-update", "--no-color"],
+                           cwd=root, capture_output=True, text=True)
+        TRUFFLEHOG_OUT[root] = p.stdout
+    return TRUFFLEHOG_OUT[root]
+
+
+def trufflehog_findings(text):
+    out = []
+    for line in text.splitlines():
+        if not line.startswith("{"):
+            continue
+        r = json.loads(line)
+        fs = (r.get("SourceMetadata") or {}).get("Data", {}).get("Filesystem")
+        if not fs or not r.get("DetectorName"):
+            continue
+        n = fs.get("line") or 1
+        out.append((fs["file"], n, n, r["DetectorName"]))
+    return out
+
+
+def trufflehog(root):
+    return trufflehog_findings(trufflehog_raw(root))
+
+
+def trufflehog_triage(root):
+    """trufflehog JSON lines re-scored by `secretscan triage`, as gitleaks+triage."""
+    out = tmpjson()
+    try:
+        cmd = [SS, "triage", "-", "--root", ".", "-f", "json", "-r", out, "--exit-code", "0", "-q"] + TRIAGE_ARGS
+        subprocess.run(cmd, cwd=root, input=trufflehog_raw(root), text=True, stderr=subprocess.DEVNULL)
+        return [(f["File"], f["StartLine"], f.get("EndLine") or f["StartLine"], f["RuleID"]) for f in json.load(open(out))
+                if not (f.get("Triage") or "").startswith("filtered")]
+    finally:
+        os.remove(out)
+
+
 def detect_secrets(root):
     p = run(["detect-secrets", "scan", "--no-verify", "--all-files", "data"], root)
     res = json.loads(p.stdout)["results"]
@@ -156,7 +216,8 @@ def detect_secrets(root):
 
 TOOLS = {"secretscan": secretscan, "secretscan-balanced-blocking": secretscan_blocking("block"),
          "secretscan-balanced-blocking(fixtures=review)": secretscan_blocking("review"),
-         "gitleaks": gitleaks, "gitleaks+triage": gitleaks_triage, "detect-secrets": detect_secrets}
+         "gitleaks": gitleaks, "gitleaks+triage": gitleaks_triage, "detect-secrets": detect_secrets,
+         "trufflehog": trufflehog, "trufflehog+triage": trufflehog_triage}
 
 
 def score(findings, meta, view, split="all"):
@@ -192,14 +253,16 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("creddata")
     ap.add_argument("--tools", default="secretscan,secretscan-balanced-blocking,secretscan-balanced-blocking(fixtures=review),"
-                    "gitleaks,gitleaks+triage,detect-secrets")
+                    "gitleaks,gitleaks+triage,trufflehog,trufflehog+triage,detect-secrets")
     ap.add_argument("--dump", help="write per-tool line lists (JSON) here")
     ap.add_argument("--split", choices=["all", "dev", "test"], default="all")
     ap.add_argument("--triage-args", default="", help="extra flags for secretscan triage, e.g. '--mode standard'")
     ap.add_argument("--gitleaks-report", help="reuse this gitleaks JSON report (full values) instead of rescanning")
+    ap.add_argument("--trufflehog-report", help="reuse this trufflehog JSON-lines report instead of rescanning")
     a = ap.parse_args()
     TRIAGE_ARGS[:] = a.triage_args.split()
     GITLEAKS_REPORT = a.gitleaks_report
+    TRUFFLEHOG_REPORT = a.trufflehog_report
     meta = load_meta(a.creddata, a.split)
     commit = run(["git", "rev-parse", "--short", "HEAD"], a.creddata).stdout.strip()
     nfiles = sum(len(fs) for _, _, fs in os.walk(os.path.join(a.creddata, "data")))
@@ -208,7 +271,8 @@ if __name__ == "__main__":
     dump = {}
     results = {}
     for name in a.tools.split(","):
-        if name.startswith("gitleaks") and not GL or name == "detect-secrets" and not shutil.which("detect-secrets"):
+        if (name.startswith("gitleaks") and not GL or name == "detect-secrets" and not shutil.which("detect-secrets")
+                or name.startswith("trufflehog") and not (TH or TRUFFLEHOG_REPORT)):
             print(f"skipping {name}: not installed", file=sys.stderr)
             continue
         results[name] = TOOLS[name](a.creddata)

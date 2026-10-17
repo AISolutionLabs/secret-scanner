@@ -472,9 +472,11 @@ alphabet go through the generic pipeline in CI, which fails if filters remove
 more than 0.02% of any alphabet (0.05% for passwords;
 `TestFalseNegativesPerAlphabet`).
 
-**Not yet shown:** trufflehog was not run (it needs a newer Go toolchain than
-this environment had; `triage` does read its output), and nobody outside the
-project has reproduced these numbers yet. `secretscan dir . -f stats` prints
+trufflehog 3.97.9 (run with `--no-verification`) finds 2.4% of CredData's
+secrets at 57.8% precision, since it only has provider-specific detectors; see
+[the results](bench/results/2026-10-16.md#5-trufflehog).
+
+**Not yet shown:** nobody outside the project has reproduced these numbers yet. `secretscan dir . -f stats` prints
 counts only (no paths, values or fingerprints) for sharing results in an issue.
 
 Reproduce: see the [results file](bench/results/2026-10-15.md#reproduce).

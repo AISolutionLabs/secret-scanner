@@ -224,7 +224,8 @@ Results are in [bench/results/](../bench/results/2026-10-15.md).
   tokens and values under keys it does not recognise as credential names.
 - Nobody outside the project has run `bench/reproduce.sh` yet; the
   `benchmark` workflow lets anyone do it in a fork.
-- trufflehog has not been run directly.
+- trufflehog was run only without verification and only on CredData and
+  leaky-repo ([results](../bench/results/2026-10-16.md#5-trufflehog)).
 - Not detected yet: HTTP `Authorization` headers (Basic, Bearer, NTLM),
   PASETO/PASERK, NKEY seeds, JWKs and OTP secrets (the largest CredData miss
   classes); hex test vectors of consecutive bytes are a false-positive class.
