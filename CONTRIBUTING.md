@@ -59,7 +59,12 @@ model and the suppression rules.
 
 Generic-rule filters live in `internal/detect/detect.go` (`genericNoise`,
 `weakPasswordNoise`, ...) and must return a named reason (it appears in the
-suppression ledger). Every filter needs:
+suppression ledger). `TestEveryFilterHasPositiveControls`
+(`internal/detect/controls_test.go`) reads the package source for every
+reason and fails until the new one has controls: a **fire** case it removes
+with that reason, **keep** cases (realistic secrets in the same domain that
+must survive), and any **pinned** real-looking secret it does remove, which
+must also be listed in docs/precision.md. Every filter also needs:
 
 - a regression test with the real false positive that motivated it (sanitized);
 - a case in `internal/detect/precision_test.go` proving it does not hide a

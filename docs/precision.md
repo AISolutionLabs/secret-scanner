@@ -311,7 +311,16 @@ when it drops a value; none applies to a provider-specific format.
     (they are read as templates): `Pa$$w0rd`;
   - all-digit keys (`number-or-date`) and identifier-shaped unquoted values
     in source code (about 2.5% of random 32-character alphanumeric values
-    assigned without quotes in a `.py`/`.js`/`.go` file).
+    assigned without quotes in a `.py`/`.js`/`.go` file);
+  - human-chosen secrets made of words plus a year under a generic key
+    (`api_secret = "MySecretToken2024!x"`, `word-tokens`); under a password
+    key the same value is reported;
+  - any value under a key ending in `algorithm`, `algo`, `scheme`, `hasher`
+    or `cipher` (`algorithm-name`): the key alone decides, so a random value
+    there is dropped too.
+
+  Each of these is pinned in `TestEveryFilterHasPositiveControls`, so it
+  cannot grow without a test change.
 - **Reported, but not blocking under balanced** (low confidence; strict
   blocks):
   - UUID-shaped values under credential keys (Heroku legacy keys and other

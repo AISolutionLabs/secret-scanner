@@ -17,6 +17,25 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod }
       - run: go test -count=1 ./...
+      # Resolve the notes first: docs/release-notes/<tag>.md, else the
+      # CHANGELOG section for the version, else its "Unreleased" section,
+      # else a pointer to the CHANGELOG. Fallbacks warn; none fails the
+      # release (v1.2.0 lost its binaries to a missing section).
+      - name: Release notes
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          section() { awk -v h="$1" '$0 ~ "^## "h"( |$)" {on=1; next} /^## / {on=0} on' CHANGELOG.md; }
+          if [ -f "docs/release-notes/$GITHUB_REF_NAME.md" ]; then
+            grep -v '^<!-- /\{0,1\}bench:' "docs/release-notes/$GITHUB_REF_NAME.md" > notes.md
+          elif section "$v" > notes.md && [ -s notes.md ]; then
+            :
+          elif section "Unreleased" > notes.md && [ -s notes.md ]; then
+            echo "::warning::CHANGELOG.md has no section for $v; using its Unreleased section"
+          else
+            echo "::warning::no release notes for $v in CHANGELOG.md or docs/release-notes"
+            printf 'See [CHANGELOG.md](https://github.com/%s/blob/%s/CHANGELOG.md).\n' "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" > notes.md
+          fi
+          test -s notes.md
       # The published figures must describe this release's detection code.
       - name: Benchmark figures measured on this detection code
         run: python3 bench/render_docs.py --check --release
@@ -36,16 +55,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          v="${GITHUB_REF_NAME#v}"
-          # Release notes: docs/release-notes/<tag>.md when present (figures
-          # generated from bench/results/latest.json, checked in CI), else the
-          # CHANGELOG section for this version. The CHANGELOG section must
-          # exist either way.
-          awk -v v="$v" '$0 ~ "^## "v"( |$)" {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
-          test -s notes.md || { echo "CHANGELOG.md has no section for $v"; exit 1; }
-          if [ -f "docs/release-notes/$GITHUB_REF_NAME.md" ]; then
-            grep -v '^<!-- /\{0,1\}bench:' "docs/release-notes/$GITHUB_REF_NAME.md" > notes.md
-          fi
+          # Notes were resolved before building (step "Release notes"); a
+          # missing section never stops the binaries from being published.
           # A release created by hand on GitHub (which also creates the tag)
           # must still get its binaries: upload into it instead of failing.
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then

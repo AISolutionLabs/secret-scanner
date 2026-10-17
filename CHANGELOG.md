@@ -4,7 +4,31 @@ All notable changes are listed here. The project follows
 [Semantic Versioning](https://semver.org); see [docs/compatibility.md](docs/compatibility.md)
 for what counts as a breaking change.
 
-## Unreleased
+## 1.2.1 - 2026-10-17
+
+The first 1.2 release with published binaries: the v1.2.0 GitHub release
+has none, because the release workflow stopped at a missing CHANGELOG
+section after building them. Detection is unchanged from 1.0.0 (same
+detection-code fingerprint as the published benchmark).
+
+- The release workflow resolves the notes before building and falls back
+  (release notes file, then the version's CHANGELOG section, then
+  "Unreleased", then a pointer to the CHANGELOG) with a warning; a missing
+  section can no longer stop the binaries from being published.
+- `TestEveryFilterHasPositiveControls`: every suppression reason the
+  detector can emit (read from its source: 36 today) must have a case it
+  removes with that reason and realistic secrets it must keep; a new filter
+  fails the build until it has them. It pins two trade-offs now listed in
+  docs/precision.md: words-plus-year secrets under generic keys
+  (`word-tokens`) and any value under `*_algorithm`/`*_scheme` keys
+  (`algorithm-name`). `algorithm-name` had no keep case before.
+- README: report retention guidance for CI.
+
+## 1.2.0 - 2026-10-17
+
+The v1.2.0 GitHub release has no binaries (see 1.2.1); `go install
+...@v1.2.0` works.
+
 
 - Release verification is a reusable workflow (`verify-release.yml`):
   `release.yml` calls it after publishing, and it can be run by hand for

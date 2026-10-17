@@ -364,6 +364,12 @@ secret without storing it.
 - **Fingerprints are sensitive metadata, not anonymized data.** A report
   identifies where each secret is and how to recognise it again; reports
   are written with mode 0600 for that reason.
+- **Access and retention.** Keep reports, SARIF artifacts and baselines
+  where only people who may see the secrets can read them, and keep them no
+  longer than needed: set a short artifact retention (`retention-days` on
+  `actions/upload-artifact`, the pipeline retention policy in Azure DevOps),
+  and prefer streaming (`-r -`, `triage -`) over files where a later step
+  only needs the result.
 - **Default: plain SHA-256.** Portable (a baseline made anywhere matches
   anywhere) and unchanged since 1.0.0, but hashing likely passwords and
   comparing recovers weak ones (`Welcome1!`) quickly. Keep such reports,

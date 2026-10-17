@@ -50,6 +50,9 @@ def num(n):
     return f"{n:,}"
 
 
+RELEASE_NOTES = "docs/release-notes/v{ver}.md"
+
+
 def current_version():
     """The version of the top CHANGELOG section: its release notes carry figures."""
     m = re.search(r"^## (\d+\.\d+\.\d+)", open(os.path.join(ROOT, "CHANGELOG.md")).read(), re.M)
@@ -163,7 +166,7 @@ the other half, which no change has seen (gitleaks: {num(tr['gitleaks_true'])} t
   conservative mode ({lost_s} in standard mode), {tr['changetoken_lost']} of them AWS WAF
   `ChangeToken` values by design.""",
         },
-        f"docs/release-notes/v{ver}.md": {
+        RELEASE_NOTES.format(ver=ver): {
             "release": f"""Samsung CredData, {d['holdout_repos']} repositories never used for design
 (secrets-only labels, default settings):
 
@@ -312,6 +315,8 @@ def render(d, root=ROOT):
     changed = {}
     for rel, regs in regions(d).items():
         path = os.path.join(root, rel)
+        if rel == RELEASE_NOTES.format(ver=current_version()) and not os.path.exists(path):
+            continue  # a release without a notes file uses its CHANGELOG section
         text = open(path).read()
         new = text
         for name, body in regs.items():
