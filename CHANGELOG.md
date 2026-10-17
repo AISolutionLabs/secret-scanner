@@ -4,10 +4,47 @@ All notable changes are listed here. The project follows
 [Semantic Versioning](https://semver.org); see [docs/compatibility.md](docs/compatibility.md)
 for what counts as a breaking change.
 
-## Unreleased
+## 1.0.0 - 2026-10-17
 
-Fixes from an adversarial recall and security review:
+First public release: 136 rules, gitleaks-compatible config and reports,
+staged/push/history/diff scanning, git hooks, placeholder and local-credential
+recognition, noise filters with a suppression ledger, confidence levels and
+strict/balanced policies, `triage` for other scanners' reports, live
+verification, remediation guidance and `explain`. Benchmark results:
+[bench/results/2026-10-17.md](https://github.com/AISolutionLabs/secret-scanner/blob/v1.0.0/bench/results/2026-10-17.md)
+(earlier rounds: 2026-10-15, 2026-10-16).
 
+### Placeholders, local credentials and new detectors
+Designed on CredData's dev half, measured once on its test half: precision
+83.7% -> 91.5%, recall 48.0% -> 59.2% on repositories never used for design.
+
+- Placeholder credentials (`some_password`, `s3krit-password`, `admin123`,
+  `postgres:postgres@`) are dropped with a ledger reason
+  (`placeholder-vocabulary`, `echoes-key-name`, `user-equals-password`);
+  so are digests under hash keys, .NET `PublicKeyToken`s, translated UI
+  strings, algorithm names, crypto test-vector key names and patterned hex.
+  Word+number passwords other than one-word defaults are still reported.
+- New `Context` field (`local` / `example`): credentials for localhost,
+  private networks, `*.local` and compose service hosts, and values in
+  docker-compose files, `.env.example` and `.env.test`, are reported at low
+  confidence and listed for review under `balanced` (strict still blocks).
+  URL credentials to local hosts were previously allowlisted silently.
+- New detectors: HTTP `Authorization: Basic` (only when it decodes to
+  `user:password`) and `Bearer` headers, SQL `CREATE/ALTER USER ... PASSWORD`
+  and `IDENTIFIED BY`, `NAME_PASSWORD=` in compose files, `docker -e`, ENV and
+  inline env, command-line passwords (`curl -u`, `sshpass -p`, `mysql -p`,
+  openssl `pass:`), password calls (`setPassword`, `SetBasicAuth`,
+  `NetworkCredential`) and token setters (`SetAuthToken`).
+- UUIDs under credential-named keys are reported at low confidence; UUIDs
+  under request, correlation, paging and concurrency keys (including AWS WAF
+  `ChangeToken`, which grants no access) are not.
+- `password-assignment` matches indexers (`["password"] =`), comparisons,
+  wrapper calls and 4-5 character values; UI labels under password keys are
+  filtered.
+- Rules can declare content validators (`basic-auth`, `opaque-token`); a
+  value that fails validation never becomes a finding.
+
+### Fixes from an adversarial recall and security review
 - One-word default passwords plus digits (`admin@123`, `Welcome@2024`,
   `P@ssw0rd2023`, `Password1`) under password keys are reported at low
   confidence outside test, example and doc files instead of being dropped
@@ -39,26 +76,6 @@ Fixes from an adversarial recall and security review:
   shell results are syntax-checked when the interpreter is installed.
 - Inputs skipped for `--max-target-megabytes` (files, stdin tail, diff
   additions) are reported in the summary instead of passing silently.
-
-- Placeholder credentials (`some_password`, `s3krit-password`, `admin123`,
-  `postgres:postgres@`) are dropped with a ledger reason
-  (`placeholder-vocabulary`, `echoes-key-name`, `user-equals-password`);
-  so are digests under hash keys, .NET `PublicKeyToken`s, translated UI
-  strings, algorithm names, crypto test-vector key names and patterned hex.
-  Word+number passwords other than one-word defaults are still reported.
-- New `Context` field (`local` / `example`): credentials for localhost,
-  private networks, `*.local` and compose service hosts, and values in
-  docker-compose files, `.env.example` and `.env.test`, are reported at low
-  confidence and listed for review under `balanced` (strict still blocks).
-  URL credentials to local hosts were previously allowlisted silently.
-
-## 1.0.0 - 2026-10-15
-
-First public release: 129 rules, gitleaks-compatible config and reports,
-staged/push/history/diff scanning, git hooks, noise filters with a
-suppression ledger, confidence levels and strict/balanced policies, `triage`
-for other scanners' reports, live verification, remediation guidance and
-`explain`. Benchmark results: [bench/results/2026-10-15.md](https://github.com/AISolutionLabs/secret-scanner/blob/v1.0.0/bench/results/2026-10-15.md).
 
 Changes since the first public commit, made in response to an external
 review (benchmark rigor, default policy, filter safety, triage and `--fix`

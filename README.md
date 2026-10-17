@@ -31,7 +31,7 @@ SARIF report.
   with its reason (`--show-suppressed`). Suppressions are narrow, and
   regression tests prove none of them hides a valid secret next to it.
 
-- **120+ built-in rules**: AWS (incl. Bedrock API keys), Azure (Entra ID secrets,
+- **130+ built-in rules**: AWS (incl. Bedrock API keys), Azure (Entra ID secrets,
   storage keys, SAS, new and legacy Azure DevOps PATs), GCP, GitHub, GitLab,
   JFrog, Vault, Terraform Cloud, Slack, Stripe, OpenAI, Anthropic, LiteLLM,
   Grafana, Datadog, private keys, credentialed URLs, JWTs, generic secrets.
@@ -428,37 +428,34 @@ Most independent evidence first.
 **1. Independent precision challenge ([Samsung CredData](https://github.com/Samsung/CredData)).**
 11,565 files from 337 real repositories with manually labeled credential
 lines, scored per line with CredData's method, excluding categories that are
-identifiers rather than secrets (UUIDs, bucket names, nonces, salts; fixed
-before running). First run, before any CredData-informed change:
+identifiers rather than secrets. Repositories are split in half by hash;
+every improvement is designed on one half and measured once on the other.
+Latest holdout ([2026-10-17](bench/results/2026-10-17.md)), on 181
+repositories never used for design:
 
 | Tool (default settings) | Precision | Recall | F1 |
 |---|---|---|---|
-| secretscan | 85.0% | **68.0%** | **0.755** |
-| gitleaks | 86.1% | 54.7% | 0.669 |
-| gitleaks + `secretscan triage` | **92.6%** | 51.9% | 0.665 |
-| detect-secrets 1.5.0 | 48.4% | 29.0% | 0.363 |
+| **secretscan** | 91.5% | **59.2%** | **0.719** |
+| secretscan, before the latest round | 83.7% | 48.0% | 0.611 |
+| gitleaks | 91.8% | 28.9% | 0.440 |
+| gitleaks + `secretscan triage` | **93.6%** | 27.5% | 0.425 |
+| trufflehog 3.97.9 | 44.7% | 3.4% | 0.064 |
 
-On real code secretscan's precision is **on par with gitleaks, not better**;
-its advantage is finding more of the secrets. That first run also showed
-triage dropping 2.8% of gitleaks' true findings. The fix (conservative
-triage) was designed on half of CredData's repositories and measured once on
-the other half: there it keeps 1,095 of gitleaks' 1,110 true findings (it
-lost 130 before) while removing 20% of its false positives. On that unseen
-half gitleaks' precision is 91.8% and secretscan's 83.7%, with recall 28.9%
-and 48.0%.
-
-Across all repositories gitleaks + conservative triage now scores 92.8%
-precision at 54.5% recall (gitleaks alone 86.1% / 54.7%). Under balanced, the
-hook default, 59.9% of CredData's labeled secrets block at 91.6% precision
-(strict: 68.7% at 85.0%). All of this was regenerated end to end with
-`bench/reproduce.sh`.
+On unseen repositories secretscan now matches gitleaks' precision while
+finding twice as many of the labeled secrets. Under balanced, the hook
+default, 39.9% of them block at 90.2% precision. On the half used for design
+it reaches 98.8% / 89.0%; the gap is the honest measure of how much of that
+transfers. Triage drops 54 of gitleaks' true findings, 41 of them AWS WAF
+`ChangeToken` values that are deliberately not treated as credentials.
+The very first CredData run, before any CredData-informed change, is in
+[2026-10-15](bench/results/2026-10-15.md).
 
 **2. Independent ground truth ([leaky-repo](https://github.com/Plazmaz/leaky-repo), 96 labeled risk lines).**
 
 | Tool | Risk lines found | Extra lines (FPs) |
 |---|---|---|
 | secretscan, before any leaky-repo-informed change | 36/96 (37.5%) | 3 |
-| secretscan, current (rules added for the gaps it exposed) | 66/96 (68.8%) | 4 |
+| secretscan, current (rules added for the gaps it exposed) | 65/96 (67.7%) | 4 |
 | gitleaks | 21/96 (21.9%) | 1 |
 | detect-secrets 1.5.0 | 37/96 (38.5%) | 1 |
 
