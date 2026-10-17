@@ -8,13 +8,17 @@ Two views are reported:
   risk-only  expected = risk lines (credentials, keys, hashes); a stricter
              view of what a secret scanner should flag
 
-  python3 bench/leaky_repo.py /path/to/leaky-repo [--tools secretscan,gitleaks,detect-secrets]
+  python3 bench/leaky_repo.py /path/to/leaky-repo [--tools secretscan,gitleaks,trufflehog,detect-secrets]
+
+trufflehog (binary from $TRUFFLEHOG or PATH) runs with --no-verification and,
+where unshare allows it, without network access.
 """
 import argparse, collections, csv, json, os, shutil, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SS = os.environ.get("SECRETSCAN", os.path.join(HERE, "..", "bin", "secretscan"))
 GL = os.environ.get("GITLEAKS", shutil.which("gitleaks") or "")
+TH = os.environ.get("TRUFFLEHOG", shutil.which("trufflehog") or "")
 
 
 def truth(repo):
@@ -66,7 +70,33 @@ def detect_secrets(repo):
     return count_lines((f, it["line_number"]) for f, items in res.items() for it in items if not f.startswith(".leaky-meta"))
 
 
-TOOLS = {"secretscan": secretscan, "gitleaks": gitleaks, "detect-secrets": detect_secrets}
+def no_network():
+    """Prefix that runs a command without network access, if allowed here."""
+    u = shutil.which("unshare")
+    if u and subprocess.run([u, "-rn", "true"], capture_output=True).returncode == 0:
+        return [u, "-rn"]
+    return []
+
+
+def trufflehog(repo):
+    # --no-verification: by default trufflehog sends every match to the provider's API.
+    p = run(no_network() + [TH, "filesystem", ".", "--json", "--no-verification", "--no-update", "--no-color"], repo)
+    found = []
+    for line in p.stdout.splitlines():
+        if not line.startswith("{"):
+            continue
+        r = json.loads(line)
+        fs = (r.get("SourceMetadata") or {}).get("Data", {}).get("Filesystem")
+        if not fs or not r.get("DetectorName"):
+            continue
+        f = os.path.normpath(fs["file"])
+        if f.startswith(".leaky-meta") or f == ".git" or f.startswith(".git" + os.sep):
+            continue
+        found.append((f, fs.get("line") or 1))
+    return count_lines(found)
+
+
+TOOLS = {"secretscan": secretscan, "gitleaks": gitleaks, "detect-secrets": detect_secrets, "trufflehog": trufflehog}
 
 
 def score(found, rows, risk_only):
@@ -92,7 +122,7 @@ def score(found, rows, risk_only):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("repo")
-    ap.add_argument("--tools", default="secretscan,gitleaks,detect-secrets")
+    ap.add_argument("--tools", default="secretscan,gitleaks,trufflehog,detect-secrets")
     a = ap.parse_args()
     rows = truth(a.repo)
     commit = run(["git", "rev-parse", "--short", "HEAD"], a.repo).stdout.strip()
@@ -102,7 +132,8 @@ if __name__ == "__main__":
     print("|---|---|---|---|---|---|")
     detail = {}
     for name in a.tools.split(","):
-        if name == "gitleaks" and not GL or name == "detect-secrets" and not shutil.which("detect-secrets"):
+        if (name == "gitleaks" and not GL or name == "detect-secrets" and not shutil.which("detect-secrets")
+                or name == "trufflehog" and not TH):
             continue
         found = TOOLS[name](a.repo)
         o, r = score(found, rows, False), score(found, rows, True)
