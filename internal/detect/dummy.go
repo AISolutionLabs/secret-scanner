@@ -345,8 +345,9 @@ func localizedText(v string) bool {
 }
 
 // Test-vector reference names in crypto test files (OpenSSL evp*.txt,
-// Wycheproof): PrivateKey=KAS-ECC-CDH_P-192_C8, PeerKey=ALICE_cf_sect193r1_PUB,
-// Key = ED448-1-PUBLIC. These name a key defined elsewhere in the file.
+// Wycheproof), such as KAS-ECC-CDH_P-192_C8, ALICE_cf_sect193r1_PUB or
+// ED448-1-PUBLIC after PrivateKey/PeerKey/Key. They name a key defined
+// elsewhere in the file.
 var (
 	vectorRole  = regexp.MustCompile(`(?i)^(?:alice|bob|malice|eve|carol|pub|public|priv|private|peer|raw|zero|kas|ecc|cdh|ecdh|dh|dhx|dsa|ecdsa|rsa|oaep|pss|pkcs\d*|ed25519|ed448|x25519|x448|fips\d*|rfc\d+|ffdhe\d+|modp\d+|sec[pt]\d+[rk]\d|prime\d+v\d|brainpoolp\d+[rt]\d|c2[pt]nb\d+[rvw]\d|wtls\d+|wap|wsg|idm|ecid|sm2|gost\w*)$`)
 	vectorShort = regexp.MustCompile(`^[A-Za-z0-9]{1,3}$`)
