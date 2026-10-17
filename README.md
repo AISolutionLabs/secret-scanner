@@ -361,10 +361,14 @@ Every finding carries `SecretHash` (JSON, CSV) and a SARIF
 `partialFingerprints` entry, so ignore entries and baselines can match a
 secret without storing it.
 
+- **Fingerprints are sensitive metadata, not anonymized data.** A report
+  identifies where each secret is and how to recognise it again; reports
+  are written with mode 0600 for that reason.
 - **Default: plain SHA-256.** Portable (a baseline made anywhere matches
-  anywhere) but not anonymous: hashing likely passwords and comparing
-  recovers weak ones (`Welcome1!`) quickly. Treat such reports, CI
-  artifacts and baselines as secrets.
+  anywhere) and unchanged since 1.0.0, but hashing likely passwords and
+  comparing recovers weak ones (`Welcome1!`) quickly. Keep such reports,
+  CI artifacts and baselines restricted to the people who may see the
+  secrets themselves.
 - **Keyed: `SECRETSCAN_HASH_KEY=<random, 16+ bytes>`** (or
   `--hash-key-file FILE`). Every fingerprint written to a report is
   `hmac-sha256:<hex>` and cannot be tested without the key. Keep the key in
@@ -425,6 +429,12 @@ stdin: --diff, --label NAME
 
 **GitHub Actions** (see [`ci/github-actions.yml`](ci/github-actions.yml)): upload
 the SARIF output to code scanning.
+
+Both templates publish the SARIF (code scanning, a build artifact), so both
+read `SECRETSCAN_HASH_KEY` from the CI secret store: define it with a random
+value (`openssl rand -hex 32`) and the published fingerprints are keyed. Do
+not publish JSON, CSV or SARIF reports without a key where people who should
+not see the secrets can read them (see [Secret fingerprints](#secret-fingerprints)).
 
 ## Push proxy / server-side use
 

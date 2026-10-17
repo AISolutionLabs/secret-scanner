@@ -4,6 +4,19 @@ All notable changes are listed here. The project follows
 [Semantic Versioning](https://semver.org); see [docs/compatibility.md](docs/compatibility.md)
 for what counts as a breaking change.
 
+## Unreleased
+
+- The CI templates (`ci/github-actions.yml`, `ci/azure-pipelines.yml`)
+  publish SARIF, so they now pass `SECRETSCAN_HASH_KEY` from the CI secret
+  store: published fingerprints are keyed once the secret is defined (plain
+  SHA-256, as before, until then; Azure warns).
+- A hash key that looks like an unexpanded CI variable (`$(...)`,
+  `${{ ... }}`, `${...}`) is refused: an undefined variable's literal text
+  is public and must not become the key.
+- README: fingerprints are documented as sensitive metadata; reports
+  without a key should not be published where people who may not see the
+  secrets can read them.
+
 ## 1.1.0 - 2026-10-17
 
 The first release with published binaries. The v1.0.0 GitHub release was

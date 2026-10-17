@@ -14,6 +14,12 @@ jobs:
         with: { go-version: '1.24' }
       - run: go install github.com/AISolutionLabs/secret-scanner/cmd/secretscan@latest
       - name: Scan
+        env:
+          # Keyed (hmac-sha256:) fingerprints in the uploaded SARIF, so people
+          # who can read code-scanning alerts cannot test guesses of weak
+          # passwords against them. Create the secret with a random value
+          # (openssl rand -hex 32); without it, fingerprints are plain SHA-256.
+          SECRETSCAN_HASH_KEY: ${{ secrets.SECRETSCAN_HASH_KEY }}
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             RANGE="origin/${{ github.base_ref }}..HEAD"

@@ -18,6 +18,10 @@ steps:
 
   - script: |
       set -e
+      case "$SECRETSCAN_HASH_KEY" in '$('*)
+        echo "##vso[task.logissue type=warning]SECRETSCAN_HASH_KEY is not defined: SARIF fingerprints are plain SHA-256"
+        unset SECRETSCAN_HASH_KEY ;;
+      esac
       if [ -n "$(System.PullRequest.TargetBranch)" ]; then
         TARGET="origin/${SYSTEM_PULLREQUEST_TARGETBRANCH#refs/heads/}"
         RANGE="$TARGET..HEAD"
@@ -27,6 +31,13 @@ steps:
       "$(go env GOPATH)/bin/secretscan" git --log-opts "$RANGE" \
         -r "$(Build.ArtifactStagingDirectory)/CodeAnalysisLogs/secretscan.sarif" --no-color
     displayName: Secret scan
+    env:
+      # Keyed (hmac-sha256:) fingerprints in the published SARIF artifact, so
+      # its readers cannot test guesses of weak passwords. Define a secret
+      # pipeline variable SECRETSCAN_HASH_KEY (openssl rand -hex 32). If it is
+      # undefined, Azure passes the literal "$(...)" text; the script above
+      # drops it with a warning (secretscan itself refuses such a "key").
+      SECRETSCAN_HASH_KEY: $(SECRETSCAN_HASH_KEY)
 
   - task: PublishBuildArtifacts@1
     condition: always()

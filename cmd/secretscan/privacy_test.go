@@ -194,3 +194,19 @@ func TestKeyedFingerprints(t *testing.T) {
 		t.Errorf("key file did not reproduce the keyed baseline: %+v", r)
 	}
 }
+
+// An undefined CI variable passed through literally must never become the
+// hash key: its text is public.
+func TestUnexpandedCIVariableIsNotAKey(t *testing.T) {
+	dir, _ := privacyRepo(t)
+	for _, v := range []string{"$(SECRETSCAN_HASH_KEY)", "${{ secrets.SECRETSCAN_HASH_KEY }}", "${SECRETSCAN_HASH_KEY_VALUE}"} {
+		cmd := exec.Command(bin, "dir", ".", "-q")
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "SECRETSCAN_HASH_KEY="+v)
+		out, err := cmd.CombinedOutput()
+		ee, _ := err.(*exec.ExitError)
+		if ee == nil || ee.ExitCode() != 2 || !strings.Contains(string(out), "unexpanded CI variable") {
+			t.Errorf("%q accepted as a hash key: %v %s", v, err, out)
+		}
+	}
+}

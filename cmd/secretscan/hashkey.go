@@ -56,6 +56,11 @@ func loadHashKey(keyFile string) (*hashKeyer, error) {
 	case os.Getenv("SECRETSCAN_HASH_KEY") != "":
 		key = []byte(os.Getenv("SECRETSCAN_HASH_KEY"))
 	}
+	if k := strings.TrimSpace(string(key)); strings.HasPrefix(k, "$(") || strings.HasPrefix(k, "${{") || strings.HasPrefix(k, "${") {
+		// An undefined CI variable is passed through literally; that text is
+		// public, so it must not become the key.
+		return nil, fmt.Errorf("hash key %q looks like an unexpanded CI variable; define the secret or unset SECRETSCAN_HASH_KEY", k)
+	}
 	if key != nil && len(key) < minHashKey {
 		return nil, errors.New("hash key must be at least 16 bytes (use a random value, e.g. openssl rand -hex 32)")
 	}
