@@ -411,7 +411,11 @@ A non-zero exit means reject the push, and the JSON tells the proxy what to repo
 `/user`, Slack `auth.test`) and marks findings `verified`, `invalid`,
 `unverified` or `error`. **This sends secrets over the network.** Never use it
 in hooks, and in locked-down networks expect `error`. Standard `HTTPS_PROXY`
-and system CA settings are honored.
+and system CA settings are honored. Only a JSON answer from the provider
+decides: proxy block or caution pages, rate limits (429) and server errors
+are `unverified`, network failures `error`. GitHub and GitLab tokens the
+public endpoint rejects stay `unverified` (they may belong to a
+self-managed instance).
 
 ## Benchmark
 
