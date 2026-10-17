@@ -274,6 +274,17 @@ func DefaultRules() []Rule {
 			`(AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58})`, []string{"age-secret-key-1"}, "key"),
 		r("kubeconfig-client-key", "Client private key embedded in kubeconfig", "critical",
 			`client-key-data:\s*["']?([A-Za-z0-9+/=]{40,})`, []string{"client-key-data"}, "kubernetes", "key"),
+		// HTTP authorization schemes (Authorization / Proxy-Authorization
+		// headers, header maps, recorded requests). Basic must decode to
+		// printable user:password; Bearer must be token-shaped (see
+		// detect/validate.go). Both yield to provider rules on the same span.
+		{ID: "http-basic-auth", Description: "HTTP Basic credentials (base64 user:password)", Severity: "high",
+			Regex:    `(?i)\bbasic[ \t]+([A-Za-z0-9+/]{4,1000}={0,2})(?:[^A-Za-z0-9+/=_.$%{}<>-]|$)`,
+			Keywords: []string{"basic"}, Tags: []string{"credentials", "http-auth"}, Validate: "basic-auth"},
+		{ID: "http-bearer-token", Description: "HTTP Bearer token in an authorization header", Severity: "medium",
+			Regex:    `(?i)\bbearer[ \t]+([A-Za-z0-9_.~+/-]{16,1000}={0,2})(?:[^A-Za-z0-9_.~+/=$%{}<>-]|$)`,
+			Keywords: []string{"bearer"}, Tags: []string{"token", "http-auth"}, Validate: "opaque-token",
+			Allowlists: []Allowlist{placeholderValues}},
 		r("jwt", "JSON Web Token", "medium", tok(`eyJ[A-Za-z0-9_-]{15,}\.eyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{10,}={0,2}`), []string{"eyj"}, "token"),
 
 		// --- Credentials in URLs / connection strings ---------------------
@@ -361,7 +372,12 @@ func DefaultRules() []Rule {
 			Regex: `(?:^|\s)password\s+(\S{3,})`, Keywords: []string{"password"},
 			Path: `(?:^|/)[._]netrc$`, Tags: []string{"credentials"}, Allowlists: []Allowlist{placeholderValues}},
 		{ID: "password-assignment", Description: "Hard-coded password literal", Severity: "low",
-			Regex:    `(?i)[\w.-]{0,30}?(?:passw(?:or)?d|pwd|passphrase|\bpass\b)(?:[ \t\w.-]{0,10})[\s'"]{0,3}(?:=|:|:=|=>)\s*["']([^"'\s$<{%]{6,64})["']`,
+			// Also: indexers (["password"] = ...), comparisons (== / ===), a
+			// literal wrapped in Some(...)/StringValue(...), and passphrases with
+			// up to two inner spaces (see weakPasswordNoise).
+			Regex: `(?i)[\w.-]{0,30}?(?:passw(?:or)?d|pwd|passphrase|\bpass\b|(?-i:Pass)\b)(?:[ \t\w.-]{0,10})[\s'"]{0,3}\]?\s*(?:={1,3}|:|:=|=>)\s*` +
+				`(?:(?:new\s+)?(?:Some|String|StringValue|types\.StringValue|StringCredentialValue|SecretStr|SecureString|Optional\.of)\(\s*)?` +
+				`(?:"([^"\s$<{%]{4,64}|[!#&-;=?-z|}~][ !#&-;=?-z|}~]{4,62}[!#&-;=?-z|}~])"|'([^'\s$<{%]{4,64}|[!-#&(-;=?-z|}~][ !-#&(-;=?-z|}~]{4,62}[!-#&(-;=?-z|}~])')`,
 			Keywords: []string{"passw", "pwd", "passphrase", "pass"},
 			Tags:     []string{"generic", "credentials"},
 			Allowlists: []Allowlist{{Description: "placeholder values", Regexes: []string{
@@ -371,10 +387,87 @@ func DefaultRules() []Rule {
 				`(?i)^(?:enter|your|my|new|old|confirm)[_ -]?pass`,
 				`^[a-zA-Z][a-zA-Z0-9+.-]*://`, // URLs (url-credentials covers passwords in URLs)
 				`^[./~]`,                      // file paths
+			}}, passwordSettings}},
+
+		// --- Passwords in statements, commands and calls -------------------
+		// The surrounding syntax says the value is a password, so word-shaped
+		// values are not dropped here; templates and placeholders are.
+		{ID: "sql-password", Description: "Password in a SQL user/role statement", Severity: "high",
+			Regex: `(?i)\b(?:` +
+				`(?:create|alter)\s+(?:user|role|login)\b[^;\n]{0,160}?\bidentified\s+(?:with\s+\S+\s+)?(?:by|as)(?:\s+password)?\s*` + sqlValue +
+				`|(?:create|alter)\s+(?:user|role|login)\b[^;\n]{0,160}?\bpassword\s*=?\s*` + sqlQuoted +
+				`|grant\b[^;\n]{0,160}?\bto\b[^;\n]{0,80}?\bidentified\s+by(?:\s+password)?\s*` + sqlQuoted +
+				`|set\s+password\s*(?:for\s+[^=;\n]{1,80})?=\s*(?:password\s*\(\s*)?` + sqlQuoted + `)`,
+			Keywords: []string{"create user", "alter user", "create role", "alter role", "create login", "alter login", "identified", "set password"},
+			Tags:     []string{"credentials"},
+			Allowlists: []Allowlist{placeholderValues, interpolatedValues, {Description: "SQL keywords and bind parameters", Regexes: []string{
+				`(?i)^(?:null|none|values|password|expire|encrypted|unencrypted|by|as|with|login|nologin|valid|default)$`,
 			}}}},
+		{ID: "env-password-assignment", Description: "Password in an environment assignment (docker -e, compose, ENV, inline env)", Severity: "medium",
+			// NAME_PASSWORD=value where NAME is an environment-style identifier:
+			// compose list items, docker -e / --env flags, Dockerfile ENV,
+			// "PGPASSWORD=... psql" prefixes, .env-like files of any name.
+			Regex:       `(?:^|[\s'"(;&|])(?:export\s+|ENV\s+|-e\s*|--env[\s=]|--build-arg[\s=])?["']?(?:(?:[A-Z][A-Z0-9]*_)*[A-Z]{0,6}(?:PASSWORD|PASSWD|PASSPHRASE)|(?:[A-Z][A-Z0-9]*_)+(?:PASS|PWD))(?:_[A-Z0-9]+)*=(?:"([^"\s$<{}()\[\];|&,\x60\\]{3,128})"|'([^'\s$<{}()\[\];|&,\x60\\]{3,128})'|([^\s"'$<{}()\[\];|&,\x60\\#]{3,128}))(?:["'\s;&|]|\\[nr]|$)`,
+			SecretGroup: 0, Keywords: []string{"pass", "pwd"},
+			Tags:       []string{"generic", "credentials", "password"},
+			Allowlists: []Allowlist{nameAllowlist, placeholderValues, hashedValues, placeholderPasswordWords, passwordSettings}},
+		{ID: "cli-password-argument", Description: "Password on a command line (curl -u, openssl pass:, sshpass, mysql -p, form posts)", Severity: "high",
+			Regex: `(?i)(?:` +
+				`\b(?:curl|wget)\b[^\n]{0,300}?\s(?:-u|--user|--proxy-user)(?:\s+|=)["']?[^\s:"'$<{]{1,64}:([^\s"'$<{]{3,128}?)["']?(?:\s|$)` +
+				`|\s-(?:pass(?:in|out)?|password|passphrase)\s+["']?pass:([^\s"'$<{]{3,128})` +
+				`|\bsshpass\s+-p\s*["']?([^\s"'$<{-][^\s"']{2,127})` +
+				`|\bmysql(?:dump|admin)?\b[^\n]{0,100}?\s-p([^\s"'$<{-][^\s"']{2,63})` +
+				`|(?:\s-[dF]\s*["']?|--data(?:-\w+)?[=\s]["']?|[?&])(?:\w*_)?(?:password|passwd|pwd|pass)=([^&\s"'$<{}%#()]{3,128})(?:[&\s"']|$))`,
+			Keywords: []string{"curl", "wget", "pass:", "sshpass", "mysql", "password=", "passwd=", "pwd=", "pass="},
+			Tags:     []string{"credentials", "password"},
+			Allowlists: []Allowlist{placeholderValues, hashedValues, placeholderPasswordWords,
+				{Description: "env and shell substitutions", Regexes: []string{`^env:`, `^file:`, `^stdin$`, `^fd:`}}}},
+		{ID: "password-call", Description: "Password passed to a setter or credential constructor", Severity: "medium",
+			// setPassword("..."), SetBasicAuth("user", "..."), new NetworkCredential("user", "..."),
+			// HTTPBasicAuth('user', '...'), auth=("user", "...").
+			Regex: `(?i)(?:` +
+				`\b(?:set|with)_?(?:key_?|store_?|trust_?store_?|key_?store_?|db_?|database_?|proxy_?|admin_?|user_?)?(?:password|passwd|passphrase)\s*\(\s*(?:new\s+String\(\s*)?["'\x60]([^"'\x60\s$<{%]{4,128})["'\x60]\s*\)` +
+				`|\b(?:\w*basic_?auth|networkcredential|gitcredential|usernamepassword\w*|passwordauthentication|passwordcredential|auth)\s*=?\s*[\(\[]\s*["'][^"'\n]{1,64}["']\s*,\s*["']([^"'\s$<{%]{3,128})["'])`,
+			Keywords:   []string{"password", "passwd", "passphrase", "auth", "credential"},
+			Tags:       []string{"credentials", "password"},
+			Allowlists: []Allowlist{placeholderValues, hashedValues, placeholderPasswordWords}},
+		{ID: "token-setter", Description: "Token or API key passed to a setter (SetAuthToken, withToken, setApiKey)", Severity: "medium",
+			Regex:    `(?i)\b(?:set|with|use)_?(?:auth_?|bearer_?|access_?|api_?|oauth_?|client_?|refresh_?|private_?)?(?:token|secret|api_?key|access_?key)\s*\(\s*["'\x60]([A-Za-z0-9_.~+/=-]{16,512})["'\x60]\s*[,)]`,
+			Keywords: []string{"token", "secret", "apikey", "api_key", "accesskey", "access_key"},
+			Tags:     []string{"token", "http-auth"}, Validate: "opaque-token",
+			Allowlists: []Allowlist{placeholderValues}},
 	}
 	return rules
 }
+
+// sqlValue is a SQL password literal: quoted (optionally backslash-escaped
+// inside a shell string) or a bare Oracle-style word. Bind parameters and
+// variables (:pw, ?, $1, @pw) never qualify. A bare Oracle password follows
+// identifier rules and starts with a letter (unquoted IDENTIFIED BY 12345 is
+// a template value in generated SQL, not a usable password).
+const (
+	sqlQuoted = `(?:\\?'([^'\\\n]{3,128})\\?'|\\?"([^"\\\n]{3,128})\\?")`
+	sqlValue  = `(?:` + sqlQuoted + `|([A-Za-z][^\s'";\\,)]{2,63}))`
+)
+
+// interpolatedValues are values spliced in at runtime: string concatenation
+// ('` + pw + `'), PHP/Ruby/template interpolation, %%TOKENS%%.
+var interpolatedValues = Allowlist{Description: "interpolated values", Regexes: []string{
+	"\x60", `^\s*\+|\+\s*$`, `^%%\w+%%$`, `^\{\$[\w>-]+\}$`, `^\$\w+$`, `^#\{`, `^\{\{`,
+}}
+
+// passwordSettings drops values of keys that configure passwords rather
+// than hold one (password_charset = 'UTF-8', PASSWORD_SCHEME=SHA512-CRYPT).
+var passwordSettings = Allowlist{Description: "password settings, not passwords", RegexTarget: "prefix", Regexes: []string{
+	`(?i)(?:passw(?:or)?d|pass|pwd|passphrase)[_.-]?(?:scheme|charset|encoding|algorithm|algo|hash\w*|type|mode|policy|length|min\w*|max\w*|file|path|env|var|rounds)\w*["'\x60\]\s]*(?:={1,3}|:|:=|=>)\s*["']?$`,
+}}
+
+// placeholderPasswordWords are config words and placeholders that are not
+// passwords when they appear as one (yes, none, changeme, ****).
+var placeholderPasswordWords = Allowlist{Description: "placeholder values", Regexes: []string{
+	`(?i)^(?:password|passw0rd|pass|changeme|changeit|secret|example|sample|dummy|test(?:ing)?|default|null|none|nil|undefined|required|optional|true|false|yes|no|on|off|redacted|x{4,}|\*{4,}|\.{4,})$`,
+	`^\d{1,3}$`, `^[a-zA-Z][a-zA-Z0-9+.-]*://`, `^[./~]`,
+}}
 
 // GenericStopwords are substrings of common non-secret values. The detector
 // applies them only to word-like values (see detect.genericNoise), so a

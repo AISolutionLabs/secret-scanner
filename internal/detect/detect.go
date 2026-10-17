@@ -95,6 +95,11 @@ var DefaultIgnoreMarkers = []string{
 
 const nextLineMarker = "secretscan:allow-next-line"
 
+// YieldsTag marks non-generic rules that still give way to provider rules
+// on the same span: an HTTP Bearer value that is also a JWT or a GitHub
+// token is reported once, by the provider rule.
+const YieldsTag = "http-auth"
+
 // Detector applies a ruleset.
 type Detector struct {
 	rs       *config.Ruleset
@@ -295,6 +300,15 @@ func (d *Detector) hits(text, lower, path string) ([]hit, []drop) {
 				if rule.Entropy > 0 && ent < entropyFloor(rule, secret) {
 					continue // never qualified: not a suppression
 				}
+				var extra []string
+				uuidCred := false
+				if rule.Validate != "" {
+					ok, why := validators[rule.Validate](secret)
+					if !ok {
+						continue // never qualified: not a suppression
+					}
+					extra = append(extra, why)
+				}
 				if filters && (rule.Generic || rule.HasTag("credentials")) {
 					if why := credentialValueNoise(rule, sub[m[0]:s], secret); why != "" {
 						dropIt(why)
@@ -311,8 +325,16 @@ func (d *Detector) hits(text, lower, path string) ([]hit, []drop) {
 						continue
 					}
 					if why := genericNoise(secret, quoted, path); why != "" {
-						dropIt(why)
-						continue
+						// A UUID under a credential-named key (access_token,
+						// secretVal, const key) can be the credential; it is
+						// kept at low confidence. Request/correlation-style
+						// keys keep the filter.
+						if why == "uuid" && credentialUUIDKey(text, w[0]+s) {
+							uuidCred = true
+						} else {
+							dropIt(why)
+							continue
+						}
 					}
 				}
 				if filters && isKnownPublic(secret) {
@@ -323,11 +345,14 @@ func (d *Detector) hits(text, lower, path string) ([]hit, []drop) {
 					dropIt("sequential-or-decoded-prose")
 					continue
 				}
-				if filters && rule.ID == "password-assignment" && weakPasswordNoise(secret) {
+				if filters && (rule.ID == "password-assignment" || rule.HasTag("password")) && weakPasswordNoise(secret) {
 					dropIt("placeholder-password")
 					continue
 				}
-				conf, ev := assess(rule, secret, quoted, path, ent)
+				conf, ev := assess(rule, secret, quoted, path, ent, extra...)
+				if uuidCred {
+					conf, ev = Low, append(ev, UUIDCredentialEvidence)
+				}
 				hs = append(hs, hit{rule: rule, mStart: w[0] + m[0], mEnd: w[0] + m[1], sStart: w[0] + s, sEnd: w[0] + e,
 					match: strings.TrimSpace(sub[m[0]:m[1]]), secret: secret, entropy: ent, confidence: conf, evidence: ev})
 			}
@@ -730,7 +755,11 @@ func dottedNamespace(s string) bool {
 	return true
 }
 
-var envVarName = regexp.MustCompile(`^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$`)
+var (
+	envVarName = regexp.MustCompile(`^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$`)
+	semverLike = regexp.MustCompile(`^[v^~>=<]*\d+\.\d+(?:\.\d+)?(?:[-+][\w.-]+)?$`)
+	winPath    = regexp.MustCompile(`^[A-Za-z]:[\\/]`)
+)
 
 // weakPasswordNoise drops "passwords" that are really labels, error codes
 // or timestamps; leet-speak and mixed values (hunter2, s00pers3cret) stay.
@@ -739,6 +768,18 @@ func weakPasswordNoise(v string) bool {
 		return true // timestamps, numbers, truncated examples, ENV_VAR_NAMES
 	}
 	hasDigit := strings.IndexFunc(v, unicode.IsDigit) >= 0
+	// Values with spaces are UI text or messages ("Must be at least 8
+	// characters", "Glemt din adgangskode?") unless they carry a digit and
+	// do not read as words; passphrases of random chunks stay.
+	if sp := strings.Count(v, " "); sp > 2 || sp > 0 && (!hasDigit || wordy.Wordiness(v) >= 0.5 || wordTokens(v)) {
+		return true
+	}
+	if strings.IndexFunc(v, func(r rune) bool { return r < 128 && (unicode.IsLetter(r) || unicode.IsDigit(r)) }) < 0 {
+		return true // no ASCII letter or digit: a localized label ("パスワード：")
+	}
+	if strings.HasSuffix(v, ":") || semverLike.MatchString(v) || winPath.MatchString(v) {
+		return true // "Clau:" labels, "1.0.0" versions, C:\ paths
+	}
 	if !hasDigit && (strings.ContainsAny(v, "-_.") || wordy.Wordiness(v) >= 0.6) {
 		return true // invalid-password, INVALID_PASSWORD, mynewpassword
 	}
@@ -1113,7 +1154,7 @@ func (d *Detector) newFinding(rule *config.CompiledRule, f Fragment, h hit, s, e
 		RuleID: rule.ID, Description: rule.Description, Severity: rule.Severity, Tags: rule.Tags,
 		File: f.FilePath, Match: h.match, Secret: h.secret, Entropy: round2(h.entropy), Decoded: decoded,
 		Commit: f.Commit, Author: f.Author, Email: f.Email, Date: f.Date, Message: f.Message,
-		sStart: s, sEnd: e, generic: rule.Generic,
+		sStart: s, sEnd: e, generic: rule.Generic || rule.HasTag(YieldsTag),
 		Confidence: h.confidence, Evidence: h.evidence,
 	}
 	if fd.Confidence == "" {

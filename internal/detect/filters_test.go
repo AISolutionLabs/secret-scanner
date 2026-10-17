@@ -69,7 +69,7 @@ func TestFilterAdversarialCases(t *testing.T) {
 		"uuid": {
 			keep:       []filterCase{{line: `HEROKU_API_KEY=01234567-89ab-4cde-8f01-23456789abcd`, path: ".env"}}, // provider rule keeps it
 			reject:     []filterCase{{line: `request_token = "0b8a6c3e-1f2d-4e5a-9b7c-6d5e4f3a2b1c"`}},
-			borderline: []filterCase{{line: `api_secret = "0b8a6c3e-1f2d-4e5a-9b7c-6d5e4f3a2b1c"`, want: false}}, // UUID secrets without a provider rule
+			borderline: []filterCase{{line: `api_secret = "0b8a6c3e-1f2d-4e5a-9b7c-6d5e4f3a2b1c"`, want: true}}, // UUID under a credential key: reported at low confidence
 		},
 		"number-or-date": {
 			keep:   []filterCase{{line: `api_secret = "20240101aBcD9xYzQ7"`}},
