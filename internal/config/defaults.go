@@ -370,7 +370,12 @@ func DefaultRules() []Rule {
 			Regex: `(?:^|\s)password\s+(\S{3,})`, Keywords: []string{"password"},
 			Path: `(?:^|/)[._]netrc$`, Tags: []string{"credentials"}, Allowlists: []Allowlist{placeholderValues}},
 		{ID: "password-assignment", Description: "Hard-coded password literal", Severity: "low",
-			Regex:    `(?i)[\w.-]{0,30}?(?:passw(?:or)?d|pwd|passphrase|\bpass\b)(?:[ \t\w.-]{0,10})[\s'"]{0,3}(?:=|:|:=|=>)\s*["']([^"'\s$<{%]{6,64})["']`,
+			// Also: indexers (["password"] = ...), comparisons (== / ===), a
+			// literal wrapped in Some(...)/StringValue(...), and passphrases with
+			// up to two inner spaces (see weakPasswordNoise).
+			Regex: `(?i)[\w.-]{0,30}?(?:passw(?:or)?d|pwd|passphrase|\bpass\b|(?-i:Pass)\b)(?:[ \t\w.-]{0,10})[\s'"]{0,3}\]?\s*(?:={1,3}|:|:=|=>)\s*` +
+				`(?:(?:new\s+)?(?:Some|String|StringValue|types\.StringValue|StringCredentialValue|SecretStr|SecureString|Optional\.of)\(\s*)?` +
+				`(?:"([^"\s$<{%]{4,64}|[!#&-;=?-z|}~][ !#&-;=?-z|}~]{4,62}[!#&-;=?-z|}~])"|'([^'\s$<{%]{4,64}|[!-#&(-;=?-z|}~][ !-#&(-;=?-z|}~]{4,62}[!-#&(-;=?-z|}~])')`,
 			Keywords: []string{"passw", "pwd", "passphrase", "pass"},
 			Tags:     []string{"generic", "credentials"},
 			Allowlists: []Allowlist{{Description: "placeholder values", Regexes: []string{
@@ -380,7 +385,7 @@ func DefaultRules() []Rule {
 				`(?i)^(?:enter|your|my|new|old|confirm)[_ -]?pass`,
 				`^[a-zA-Z][a-zA-Z0-9+.-]*://`, // URLs (url-credentials covers passwords in URLs)
 				`^[./~]`,                      // file paths
-			}}}},
+			}}, passwordSettings}},
 
 		// --- Passwords in statements, commands and calls -------------------
 		// The surrounding syntax says the value is a password, so word-shaped
@@ -402,9 +407,8 @@ func DefaultRules() []Rule {
 			// "PGPASSWORD=... psql" prefixes, .env-like files of any name.
 			Regex:       `(?:^|[\s'"(;&|])(?:export\s+|ENV\s+|-e\s*|--env[\s=]|--build-arg[\s=])?["']?(?:(?:[A-Z][A-Z0-9]*_)*[A-Z]{0,6}(?:PASSWORD|PASSWD|PASSPHRASE)|(?:[A-Z][A-Z0-9]*_)+(?:PASS|PWD))(?:_[A-Z0-9]+)*=(?:"([^"\s$<{}()\[\];|&,\x60\\]{3,128})"|'([^'\s$<{}()\[\];|&,\x60\\]{3,128})'|([^\s"'$<{}()\[\];|&,\x60\\#]{3,128}))(?:["'\s;&|]|\\[nr]|$)`,
 			SecretGroup: 0, Keywords: []string{"pass", "pwd"},
-			Tags: []string{"generic", "credentials", "password"},
-			Allowlists: []Allowlist{nameAllowlist, placeholderValues, hashedValues, placeholderPasswordWords, {Description: "password settings, not passwords", RegexTarget: "prefix",
-				Regexes: []string{`(?i)(?:passw(?:or)?d|pass|pwd|passphrase)_(?:scheme|algorithm|algo|hash\w*|type|mode|policy|length|min\w*|max\w*|file|path|env|var|rounds)(?:_[A-Z0-9]+)*=["']?$`}}}},
+			Tags:       []string{"generic", "credentials", "password"},
+			Allowlists: []Allowlist{nameAllowlist, placeholderValues, hashedValues, placeholderPasswordWords, passwordSettings}},
 		{ID: "cli-password-argument", Description: "Password on a command line (curl -u, openssl pass:, sshpass, mysql -p, form posts)", Severity: "high",
 			Regex: `(?i)(?:` +
 				`\b(?:curl|wget)\b[^\n]{0,300}?\s(?:-u|--user|--proxy-user)(?:\s+|=)["']?[^\s:"'$<{]{1,64}:([^\s"'$<{]{3,128}?)["']?(?:\s|$)` +
@@ -448,6 +452,12 @@ const (
 // ('` + pw + `'), PHP/Ruby/template interpolation, %%TOKENS%%.
 var interpolatedValues = Allowlist{Description: "interpolated values", Regexes: []string{
 	"\x60", `^\s*\+|\+\s*$`, `^%%\w+%%$`, `^\{\$[\w>-]+\}$`, `^\$\w+$`, `^#\{`, `^\{\{`,
+}}
+
+// passwordSettings drops values of keys that configure passwords rather
+// than hold one (password_charset = 'UTF-8', PASSWORD_SCHEME=SHA512-CRYPT).
+var passwordSettings = Allowlist{Description: "password settings, not passwords", RegexTarget: "prefix", Regexes: []string{
+	`(?i)(?:passw(?:or)?d|pass|pwd|passphrase)[_.-]?(?:scheme|charset|encoding|algorithm|algo|hash\w*|type|mode|policy|length|min\w*|max\w*|file|path|env|var|rounds)\w*["'\x60\]\s]*(?:={1,3}|:|:=|=>)\s*["']?$`,
 }}
 
 // placeholderPasswordWords are config words and placeholders that are not

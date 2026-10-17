@@ -739,7 +739,11 @@ func dottedNamespace(s string) bool {
 	return true
 }
 
-var envVarName = regexp.MustCompile(`^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$`)
+var (
+	envVarName = regexp.MustCompile(`^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$`)
+	semverLike = regexp.MustCompile(`^[v^~>=<]*\d+\.\d+(?:\.\d+)?(?:[-+][\w.-]+)?$`)
+	winPath    = regexp.MustCompile(`^[A-Za-z]:[\\/]`)
+)
 
 // weakPasswordNoise drops "passwords" that are really labels, error codes
 // or timestamps; leet-speak and mixed values (hunter2, s00pers3cret) stay.
@@ -748,6 +752,18 @@ func weakPasswordNoise(v string) bool {
 		return true // timestamps, numbers, truncated examples, ENV_VAR_NAMES
 	}
 	hasDigit := strings.IndexFunc(v, unicode.IsDigit) >= 0
+	// Values with spaces are UI text or messages ("Must be at least 8
+	// characters", "Glemt din adgangskode?") unless they carry a digit and
+	// do not read as words; passphrases of random chunks stay.
+	if sp := strings.Count(v, " "); sp > 2 || sp > 0 && (!hasDigit || wordy.Wordiness(v) >= 0.5 || wordTokens(v)) {
+		return true
+	}
+	if strings.IndexFunc(v, func(r rune) bool { return r < 128 && (unicode.IsLetter(r) || unicode.IsDigit(r)) }) < 0 {
+		return true // no ASCII letter or digit: a localized label ("パスワード：")
+	}
+	if strings.HasSuffix(v, ":") || semverLike.MatchString(v) || winPath.MatchString(v) {
+		return true // "Clau:" labels, "1.0.0" versions, C:\ paths
+	}
 	if !hasDigit && (strings.ContainsAny(v, "-_.") || wordy.Wordiness(v) >= 0.6) {
 		return true // invalid-password, INVALID_PASSWORD, mynewpassword
 	}

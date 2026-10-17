@@ -96,7 +96,7 @@ func TestHTTPBearerToken(t *testing.T) {
 		{text: `this.req.headers = { authorization: 'Bearer ` + tok + `' };`, path: "server.ts", want: true},
 		{text: `"headers": "Authorization: Bearer ` + tok + `\n",`, path: "c.json", want: true},
 		{text: `"expectedHeaders" => ["Authorization" => "Bearer ` + tok + `=",],`, path: "t.php", want: true},
-		{text: `ab -c 10 -H "Authorization: Bearer ` + g2(lowAln, 16) + `"`, path: "bench.sh", want: true},
+		{text: `ab -c 10 -H "Authorization: Bearer ` + g2(lowAln, 14) + `4q"`, path: "bench.sh", want: true},
 		// must not catch
 		{text: `Authorization: Bearer ${token}`, want: false},
 		{text: `Authorization: Bearer <access_token>`, want: false},
