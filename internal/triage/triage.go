@@ -324,6 +324,35 @@ func (in Input) matches(ours string) bool {
 	return in.Prefix != "" && strings.HasPrefix(ours, in.Prefix)
 }
 
+// coveredBy reports whether a value secretscan filtered contains the whole
+// reported value: only then does the filter's reason explain the finding.
+// (A placeholder that merely occurs inside a longer reported token does
+// not.)
+func (in Input) coveredBy(filtered string) bool {
+	if in.Redacted {
+		return in.Prefix != "" && strings.HasPrefix(filtered, in.Prefix)
+	}
+	if in.Secret == "" || filtered == "" {
+		return false
+	}
+	if strings.Contains(filtered, in.Secret) {
+		return true
+	}
+	// Tools draw value boundaries differently ("x" vs x, a trailing ;): a
+	// reported value that only adds punctuation is still the same value.
+	return strings.Contains(in.Secret, filtered) && alnumCount(in.Secret) == alnumCount(filtered)
+}
+
+func alnumCount(s string) int {
+	n := 0
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' {
+			n++
+		}
+	}
+	return n
+}
+
 func valueNear(text, probe string, start, end int) bool {
 	lp := strings.ToLower(probe) // case-insensitive rules report the matched text in any case
 	for n := max(1, start-1); n <= end+1; n++ {
@@ -388,7 +417,7 @@ func (t *Triager) Evaluate(in Input) detect.Finding {
 	// Works with partially redacted reports (prefix match).
 	var spared []string
 	for _, s := range res.Suppressed {
-		if near(s.StartLine, in.StartLine) && in.matches(s.Secret) {
+		if near(s.StartLine, in.StartLine) && in.coveredBy(s.Secret) {
 			if t.spare(s.Reason, f.Line, in) {
 				spared = append(spared, s.Reason)
 				break
