@@ -117,6 +117,10 @@ func parseSARIF(data []byte) (string, []Input, error) {
 					} `json:"physicalLocation"`
 				} `json:"locations"`
 				PartialFingerprints map[string]string `json:"partialFingerprints"`
+				Properties          struct {
+					Commit string `json:"commit"`
+					Source string `json:"source"`
+				} `json:"properties"`
 			} `json:"results"`
 		} `json:"runs"`
 	}
@@ -134,7 +138,13 @@ func parseSARIF(data []byte) (string, []Input, error) {
 				in.StartLine = pl.Region.StartLine
 				in.Secret = pl.Region.Snippet.Text
 			}
-			in.Commit = r.PartialFingerprints["commitSha"]
+			// gitleaks puts the commit in partialFingerprints; secretscan's own
+			// SARIF also has it (and the original tool, after triage) in
+			// properties.
+			in.Commit = nonEmpty(r.PartialFingerprints["commitSha"], r.Properties.Commit)
+			if r.Properties.Source != "" {
+				in.Tool = strings.ToLower(r.Properties.Source)
+			}
 			out = append(out, finish(in))
 		}
 	}
